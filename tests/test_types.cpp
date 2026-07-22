@@ -209,6 +209,12 @@ TEST_CASE("build_content_array with only text", "[types][contentpart]") {
     CHECK(arr[0]["text"] == "hello");
 }
 
+TEST_CASE("build_content_array with empty parts", "[types][contentpart]") {
+    auto arr = build_content_array({});
+    REQUIRE(arr.is_array());
+    CHECK(arr.empty());
+}
+
 TEST_CASE("has_multipart_content with single text returns false", "[types][contentpart]") {
     CHECK_FALSE(has_multipart_content({ContentPart{}}));
 }
