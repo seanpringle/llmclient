@@ -285,6 +285,58 @@ void SSEParser::process_line(std::string line) {
                 if (cb_.on_data) {
                     cb_.on_data(current_event_, j);
                 }
+
+                // ── Structured delta extraction (OpenAI streaming format) ──
+                // Only process data events that carry choices with delta.
+                if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
+                    const auto& delta = j["choices"][0]["delta"];
+
+                    auto extract_str = [&](const std::string& key) -> std::string_view {
+                        auto it = delta.find(key);
+                        if (it != delta.end() && it->is_string()) {
+                            auto& s = it->get_ref<const std::string&>();
+                            return std::string_view(s);
+                        }
+                        return {};
+                    };
+
+                    // Content delta
+                    if (cb_.on_content_delta) {
+                        auto text = extract_str("content");
+                        if (!text.empty())
+                            cb_.on_content_delta(text);
+                    }
+
+                    // Reasoning delta — check both `reasoning_content` and `reasoning`
+                    if (cb_.on_reasoning_delta) {
+                        auto text = extract_str("reasoning_content");
+                        if (text.empty())
+                            text = extract_str("reasoning");
+                        if (!text.empty())
+                            cb_.on_reasoning_delta(text);
+                    }
+
+                    // Tool calls delta — pass the full delta so consumers
+                    // can use ToolAccumulator::apply().
+                    if (cb_.on_tool_call_delta) {
+                        auto tc_it = delta.find("tool_calls");
+                        if (tc_it != delta.end() && tc_it->is_array()) {
+                            cb_.on_tool_call_delta(delta);
+                        }
+                    }
+                }
+
+                // Usage object (final chunk)
+                if (cb_.on_usage) {
+                    auto usage_it = j.find("usage");
+                    if (usage_it != j.end() && usage_it->is_object()) {
+                        try {
+                            cb_.on_usage(usage_it->get<Usage>());
+                        } catch (...) {
+                            // swallow parse errors for usage
+                        }
+                    }
+                }
             } catch (...) {
                 // swallow — must not throw through C frames (libcurl)
             }

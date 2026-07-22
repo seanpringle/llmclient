@@ -93,6 +93,21 @@ class SSEParser {
         DataCallback on_data;
         DoneCallback on_done;
         ErrorCallback on_error;
+
+        // ── Structured streaming callbacks (optional, OpenAI delta format) ──
+        // These are called in addition to on_data when the JSON carries the
+        // corresponding field.  They save consumers from manually extracting
+        // fields from the delta JSON.
+
+        /// Called for each content delta chunk.
+        std::function<void(std::string_view text)> on_content_delta;
+        /// Called for reasoning content delta (both `reasoning_content` and
+        /// `reasoning` field names are checked).
+        std::function<void(std::string_view text)> on_reasoning_delta;
+        /// Called for each tool_calls delta fragment (raw JSON array element).
+        std::function<void(const nlohmann::json& delta)> on_tool_call_delta;
+        /// Called once with the final usage object.
+        std::function<void(Usage u)> on_usage;
     };
 
     explicit SSEParser(Callbacks cb);
