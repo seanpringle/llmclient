@@ -10,6 +10,37 @@
 namespace llmclient {
 
 // ---------------------------------------------------------------------------
+// ContentPartType — type of a multipart content part
+// ---------------------------------------------------------------------------
+
+enum class ContentPartType { Text, Image };
+
+// ---------------------------------------------------------------------------
+// ContentPart — a single part of a multipart message (protocol only)
+// ---------------------------------------------------------------------------
+
+struct ContentPart {
+    ContentPartType type = ContentPartType::Text;
+    std::string text;          // for Text parts
+    std::string data;          // base64 data
+    std::string media_type;    // e.g. "image/jpeg", "image/png"
+    std::string detail;        // OpenAI detail param: "auto", "low", "high"
+};
+
+void to_json(nlohmann::json& j, const ContentPart& cp);
+void from_json(const nlohmann::json& j, ContentPart& cp);
+
+/// Build an OpenAI content array from a vector of ContentParts.
+nlohmann::json build_content_array(const std::vector<ContentPart>& parts);
+
+/// Returns true if any ContentPart in the vector is non-text.
+bool has_multipart_content(const std::vector<ContentPart>& parts);
+
+/// Returns true if any message in the vector uses multipart content.
+bool any_user_multipart(const std::vector<std::string>& roles,
+                        const std::vector<std::vector<ContentPart>>& parts_list);
+
+// ---------------------------------------------------------------------------
 // ToolCall — represents a function call requested by the model (protocol only)
 // ---------------------------------------------------------------------------
 

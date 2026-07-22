@@ -19,6 +19,79 @@ void from_json(const nlohmann::json& j, Usage& u) {
 }
 
 // ---------------------------------------------------------------------------
+// ContentPart serialization
+// ---------------------------------------------------------------------------
+
+static const char* content_part_type_str(ContentPartType t) {
+    switch (t) {
+        case ContentPartType::Text: return "text";
+        case ContentPartType::Image: return "image";
+    }
+    return "text";
+}
+
+static ContentPartType content_part_type_from_str(const std::string& s) {
+    if (s == "image") return ContentPartType::Image;
+    return ContentPartType::Text;
+}
+
+void to_json(nlohmann::json& j, const ContentPart& cp) {
+    j["type"] = content_part_type_str(cp.type);
+    if (cp.type == ContentPartType::Text) {
+        j["text"] = cp.text;
+    } else {
+        j["data"] = cp.data;
+        j["media_type"] = cp.media_type;
+        if (!cp.detail.empty()) j["detail"] = cp.detail;
+    }
+}
+
+void from_json(const nlohmann::json& j, ContentPart& cp) {
+    cp.type = content_part_type_from_str(j.value("type", "text"));
+    cp.text = j.value("text", "");
+    cp.data = j.value("data", "");
+    cp.media_type = j.value("media_type", "");
+    cp.detail = j.value("detail", "");
+}
+
+nlohmann::json build_content_array(const std::vector<ContentPart>& parts) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& p : parts) {
+        if (p.type == ContentPartType::Text) {
+            arr.push_back({{"type", "text"}, {"text", sanitize_utf8(p.text)}});
+        } else if (p.type == ContentPartType::Image) {
+            std::string data_url = "data:" + p.media_type + ";base64," + p.data;
+            nlohmann::json img;
+            img["type"] = "image_url";
+            img["image_url"]["url"] = data_url;
+            if (!p.detail.empty())
+                img["image_url"]["detail"] = p.detail;
+            arr.push_back(std::move(img));
+        }
+    }
+    return arr;
+}
+
+bool has_multipart_content(const std::vector<ContentPart>& parts) {
+    if (parts.empty())
+        return false;
+    if (parts.size() > 1)
+        return true;
+    return parts[0].type != ContentPartType::Text;
+}
+
+bool any_user_multipart(const std::vector<std::string>& roles,
+                        const std::vector<std::vector<ContentPart>>& parts_list) {
+    if (roles.size() != parts_list.size())
+        return false;
+    for (size_t i = 0; i < roles.size(); i++) {
+        if (roles[i] == "user" && has_multipart_content(parts_list[i]))
+            return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // ToolAccumulator — merges streaming tool_call deltas across SSE chunks
 //
 // OpenAI streaming format emits tool_calls as incremental delta fragments.

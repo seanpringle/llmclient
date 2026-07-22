@@ -127,6 +127,130 @@ TEST_CASE("ToolAccumulator multiple parallel tool calls", "[types][toolacc]") {
 }
 
 // ========================================================================
+// ContentPart tests
+// ========================================================================
+
+TEST_CASE("ContentPart defaults to text type with empty fields", "[types][contentpart]") {
+    ContentPart cp;
+    CHECK(cp.type == ContentPartType::Text);
+    CHECK(cp.text.empty());
+    CHECK(cp.data.empty());
+    CHECK(cp.media_type.empty());
+    CHECK(cp.detail.empty());
+}
+
+TEST_CASE("ContentPart text JSON round-trip", "[types][contentpart]") {
+    ContentPart cp;
+    cp.type = ContentPartType::Text;
+    cp.text = "Hello world";
+
+    json j = cp;
+    ContentPart cp2 = j.get<ContentPart>();
+    CHECK(cp2.type == ContentPartType::Text);
+    CHECK(cp2.text == "Hello world");
+}
+
+TEST_CASE("ContentPart image JSON round-trip", "[types][contentpart]") {
+    ContentPart cp;
+    cp.type = ContentPartType::Image;
+    cp.data = "base64data";
+    cp.media_type = "image/png";
+    cp.detail = "high";
+
+    json j = cp;
+    ContentPart cp2 = j.get<ContentPart>();
+    CHECK(cp2.type == ContentPartType::Image);
+    CHECK(cp2.data == "base64data");
+    CHECK(cp2.media_type == "image/png");
+    CHECK(cp2.detail == "high");
+}
+
+TEST_CASE("ContentPart image without detail", "[types][contentpart]") {
+    ContentPart cp;
+    cp.type = ContentPartType::Image;
+    cp.data = "data";
+    cp.media_type = "image/jpeg";
+
+    json j = cp;
+    ContentPart cp2 = j.get<ContentPart>();
+    CHECK(cp2.type == ContentPartType::Image);
+    CHECK(cp2.detail.empty());
+}
+
+TEST_CASE("build_content_array with mixed text and image", "[types][contentpart]") {
+    ContentPart text_part;
+    text_part.type = ContentPartType::Text;
+    text_part.text = "Look at this:";
+
+    ContentPart img_part;
+    img_part.type = ContentPartType::Image;
+    img_part.data = "abc123";
+    img_part.media_type = "image/png";
+
+    auto arr = build_content_array({text_part, img_part});
+    REQUIRE(arr.is_array());
+    REQUIRE(arr.size() == 2);
+
+    CHECK(arr[0]["type"] == "text");
+    CHECK(arr[0]["text"] == "Look at this:");
+
+    CHECK(arr[1]["type"] == "image_url");
+    CHECK(arr[1]["image_url"]["url"] == "data:image/png;base64,abc123");
+    CHECK(arr[1]["image_url"].find("detail") == arr[1]["image_url"].end());
+}
+
+TEST_CASE("build_content_array with only text", "[types][contentpart]") {
+    ContentPart text_part;
+    text_part.type = ContentPartType::Text;
+    text_part.text = "hello";
+
+    auto arr = build_content_array({text_part});
+    REQUIRE(arr.size() == 1);
+    CHECK(arr[0]["text"] == "hello");
+}
+
+TEST_CASE("has_multipart_content with single text returns false", "[types][contentpart]") {
+    CHECK_FALSE(has_multipart_content({ContentPart{}}));
+}
+
+TEST_CASE("has_multipart_content with single image returns true", "[types][contentpart]") {
+    ContentPart img;
+    img.type = ContentPartType::Image;
+    CHECK(has_multipart_content({img}));
+}
+
+TEST_CASE("has_multipart_content with multiple parts returns true", "[types][contentpart]") {
+    ContentPart a, b;
+    CHECK(has_multipart_content({a, b}));
+}
+
+TEST_CASE("has_multipart_content with empty vector returns false", "[types][contentpart]") {
+    CHECK_FALSE(has_multipart_content({}));
+}
+
+TEST_CASE("any_user_multipart detects multipart user messages", "[types][contentpart]") {
+    std::vector<std::string> roles = {"user", "assistant", "user"};
+    ContentPart img;
+    img.type = ContentPartType::Image;
+    std::vector<std::vector<ContentPart>> parts = {
+        {ContentPart{}},          // user 0: text only
+        {},                       // assistant: no parts
+        {img}                     // user 1: has image
+    };
+    CHECK(any_user_multipart(roles, parts));
+}
+
+TEST_CASE("any_user_multipart with no multipart returns false", "[types][contentpart]") {
+    std::vector<std::string> roles = {"user", "assistant", "user"};
+    std::vector<std::vector<ContentPart>> parts = {
+        {ContentPart{}},
+        {},
+        {ContentPart{}}
+    };
+    CHECK_FALSE(any_user_multipart(roles, parts));
+}
+
+// ========================================================================
 // Usage tests
 // ========================================================================
 
