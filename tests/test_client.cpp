@@ -254,7 +254,11 @@ TEST_CASE("Client fetch_model_context_limit from /v1/models", "[client]") {
     CHECK(limit == 32000);
 }
 
-TEST_CASE("Client fetch_model_context_limit model not found returns 0", "[client]") {
+TEST_CASE("Client fetch_model_context_limit fallback model with 0 context_window", "[client]") {
+    // When the requested model isn't in the list, the function falls back
+    // to the first model in the data array. If that fallback has a
+    // context_window of 0 (or no usable field), the result (0) is cached
+    // so we don't re-query on every call.
     MockServer server([](const std::string& req) -> std::string {
         if (req.find("/v1/models") != std::string::npos) {
             return R"({"object":"list","data":[
@@ -355,6 +359,25 @@ TEST_CASE("Client fetch_model_context_limit separate cache per base URL", "[clie
     // Calling client_a again with same model should return cached value
     CHECK(client_a.fetch_model_context_limit("m") == 8000);
     CHECK(call_count_a == 1); // no new request to server_a
+}
+
+TEST_CASE("Client fetch_model_context_limit does not cache HTTP errors", "[client]") {
+    std::atomic<int> call_count{0};
+    // Mock that always returns something that isn't a valid models response.
+    // First call: fails → returns 0, not cached.
+    // Second call: should retry (not served from cache).
+    MockServer server([&](const std::string&) -> std::string {
+        call_count++;
+        return R"({"error":"not a models list"})";
+    });
+    Client client(server.base_url());
+
+    CHECK(client.fetch_model_context_limit("m") == 0);
+    CHECK(call_count == 1);
+
+    // Second call — should NOT be cached (HTTP error wasn't cached)
+    CHECK(client.fetch_model_context_limit("m") == 0);
+    CHECK(call_count == 2);
 }
 
 // ===================================================================
