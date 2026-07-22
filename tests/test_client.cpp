@@ -132,6 +132,64 @@ TEST_CASE("Client streaming calls on_error for bad JSON", "[client]") {
 }
 
 // ===================================================================
+// Structured streaming callbacks through Client
+// ===================================================================
+
+TEST_CASE("Client streaming structured callbacks fire correctly", "[client]") {
+    // SSE with content, reasoning, tool calls, usage, and [DONE]
+    MockServer server(
+        [](const std::string&) -> std::string {
+            return "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Thinking...\",\"content\":\"Hello\"}}]}\n\n"
+                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n"
+                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"test\",\"arguments\":\"{}\"}}]}}]}\n\n"
+                   "data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\n"
+                   "data: [DONE]\n\n";
+        },
+        true);
+
+    Client client(server.base_url());
+    json payload = {{"model", "test"}, {"messages", {}}};
+
+    std::string content;
+    std::string reasoning;
+    int tool_call_count = 0;
+    ToolAccumulator tool_acc;
+    bool usage_seen = false;
+    bool done = false;
+    bool errored = false;
+    int data_cb_count = 0;
+
+    SSEParser::Callbacks cbs;
+    cbs.on_data = [&](const std::string&, const json&) { data_cb_count++; };
+    cbs.on_done = [&]() { done = true; };
+    cbs.on_error = [&](const std::string&) { errored = true; };
+    cbs.on_content_delta = [&](std::string_view t) { content += std::string(t); };
+    cbs.on_reasoning_delta = [&](std::string_view t) { reasoning += std::string(t); };
+    cbs.on_tool_call_delta = [&](const json& d) { tool_call_count++; tool_acc.apply(d); };
+    cbs.on_usage = [&](Usage u) {
+        usage_seen = true;
+        CHECK(u.prompt_tokens == 10);
+        CHECK(u.completion_tokens == 20);
+        CHECK(u.total_tokens == 30);
+    };
+
+    auto result = client.stream_chat(payload, std::move(cbs));
+    REQUIRE(result);
+    CHECK_FALSE(errored);
+    CHECK(done);
+    CHECK(content == "Hello world");
+    CHECK(reasoning == "Thinking...");
+    CHECK(tool_call_count == 1);
+    auto calls = tool_acc.finalize();
+    REQUIRE(calls.size() == 1);
+    CHECK(calls[0].id == "call_1");
+    CHECK(calls[0].name == "test");
+    CHECK(usage_seen);
+    // on_data should have been called for every event (4 data events + 1 [DONE] = 5, but [DONE] doesn't call on_data, so 4)
+    CHECK(data_cb_count == 4);
+}
+
+// ===================================================================
 // last_raw_response
 // ===================================================================
 

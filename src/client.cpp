@@ -345,6 +345,31 @@ std::expected<void, std::string> llmclient::Client::stream_chat(const nlohmann::
             cb(s);
         };
     }
+    // ── Forward structured streaming callbacks ──
+    if (callbacks.on_content_delta) {
+        guarded.on_content_delta = [&data_delivered, cb = std::move(callbacks.on_content_delta)](std::string_view t) {
+            data_delivered = true;
+            cb(t);
+        };
+    }
+    if (callbacks.on_reasoning_delta) {
+        guarded.on_reasoning_delta = [&data_delivered, cb = std::move(callbacks.on_reasoning_delta)](std::string_view t) {
+            data_delivered = true;
+            cb(t);
+        };
+    }
+    if (callbacks.on_tool_call_delta) {
+        guarded.on_tool_call_delta = [&data_delivered, cb = std::move(callbacks.on_tool_call_delta)](const nlohmann::json& d) {
+            data_delivered = true;
+            cb(d);
+        };
+    }
+    if (callbacks.on_usage) {
+        guarded.on_usage = [&data_delivered, cb = std::move(callbacks.on_usage)](Usage u) {
+            data_delivered = true;
+            cb(u);
+        };
+    }
 
     SSEParser parser(std::move(guarded));
 
