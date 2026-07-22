@@ -324,4 +324,94 @@ void SSEParser::reset() {
     current_event_.clear();
 }
 
+// ---------------------------------------------------------------------------
+// build_openai_payload — build OpenAI-compatible messages array
+// ---------------------------------------------------------------------------
+
+nlohmann::json build_openai_payload(const std::vector<ProtocolMessage>& messages,
+                                    const std::string& system_prompt) {
+    nlohmann::json arr = nlohmann::json::array();
+
+    arr.push_back({{"role", "system"}, {"content", sanitize_utf8(system_prompt)}});
+
+    // Check if any user message uses multipart content — forces all user
+    // messages to use array form.
+    bool force_multipart = false;
+    for (const auto& msg : messages) {
+        if (msg.role == "user" && has_multipart_content(msg.parts)) {
+            force_multipart = true;
+            break;
+        }
+    }
+
+    for (const auto& msg : messages) {
+        if (msg.role == "assistant" && !msg.tool_calls.empty()) {
+            // Assistant with tool calls — expand into assistant + tool messages
+            nlohmann::json j;
+            j["role"] = "assistant";
+            j["content"] = nullptr;
+            if (!msg.reasoning_content.empty()) {
+                j["reasoning_content"] = sanitize_utf8(msg.reasoning_content);
+            }
+
+            nlohmann::json tc_arr = nlohmann::json::array();
+            for (const auto& tc : msg.tool_calls) {
+                nlohmann::json tc_json;
+                tc_json["id"] = tc.id;
+                tc_json["type"] = "function";
+                tc_json["function"] = {{"name", tc.name}, {"arguments", tc.arguments}};
+                tc_arr.push_back(std::move(tc_json));
+            }
+            j["tool_calls"] = std::move(tc_arr);
+            arr.push_back(std::move(j));
+        } else if (msg.role == "tool") {
+            nlohmann::json j;
+            j["role"] = "tool";
+            j["tool_call_id"] = msg.tool_call_id;
+            j["content"] = sanitize_utf8(msg.content.value_or(""));
+            arr.push_back(std::move(j));
+        } else if (msg.role == "user" && (has_multipart_content(msg.parts) || force_multipart)) {
+            nlohmann::json j;
+            j["role"] = "user";
+            if (has_multipart_content(msg.parts)) {
+                j["content"] = build_content_array(msg.parts);
+            } else {
+                nlohmann::json content_arr = nlohmann::json::array();
+                content_arr.push_back({{"type", "text"}, {"text", sanitize_utf8(msg.content.value_or(""))}});
+                j["content"] = std::move(content_arr);
+            }
+            arr.push_back(std::move(j));
+        } else {
+            nlohmann::json j;
+            j["role"] = msg.role;
+            j["content"] = sanitize_utf8(msg.content.value_or(""));
+
+            if (msg.role == "assistant" && !msg.reasoning_content.empty()) {
+                j["reasoning_content"] = sanitize_utf8(msg.reasoning_content);
+            }
+
+            arr.push_back(std::move(j));
+        }
+    }
+
+    return arr;
+}
+
+// ---------------------------------------------------------------------------
+// make_function_tool — build a function tool definition JSON object
+// ---------------------------------------------------------------------------
+
+nlohmann::json make_function_tool(const std::string& name,
+                                  const std::string& description,
+                                  const nlohmann::json& parameters) {
+    return {
+        {"type", "function"},
+        {"function", {
+            {"name", name},
+            {"description", description},
+            {"parameters", parameters}
+        }}
+    };
+}
+
 } // namespace llmclient

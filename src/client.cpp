@@ -428,3 +428,67 @@ std::expected<void, std::string> llmclient::Client::stream_chat(const nlohmann::
 
     return {};
 }
+
+// ── Payload building ──
+
+nlohmann::json llmclient::Client::build_chat_request(const std::string& model,
+                                                     const nlohmann::json& messages,
+                                                     const nlohmann::json& tools,
+                                                     bool stream,
+                                                     int max_tokens_hint,
+                                                     int context_limit,
+                                                     bool thinking_enabled) const {
+    nlohmann::json payload = {
+        {"model", model},
+        {"messages", messages},
+        {"tools", tools},
+        {"stream", stream},
+        {"stream_options", {{"include_usage", true}}}
+    };
+
+    int limit = max_tokens_hint > 0 ? max_tokens_hint
+        : (context_limit > 0 ? std::min(context_limit / 4, 32768) : 32768);
+    apply_thinking_params(payload, limit, model, thinking_enabled);
+    return payload;
+}
+
+void llmclient::Client::apply_thinking_params(nlohmann::json& payload, int limit,
+                                              const std::string& model,
+                                              bool thinking_enabled) const {
+    if (thinking_enabled) {
+        std::string lower = model;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        bool is_openai = lower.find("o1") != std::string::npos
+                      || lower.find("o3") != std::string::npos
+                      || lower.find("o4") != std::string::npos
+                      || lower.find("gpt-5") != std::string::npos;
+        if (is_openai) {
+            payload["reasoning_effort"] = "high";
+        } else {
+            payload["thinking"] = {{"type", "enabled"}};
+        }
+        payload["max_completion_tokens"] = limit;
+    } else {
+        payload["max_tokens"] = limit;
+    }
+}
+
+bool llmclient::Client::model_supports_thinking(const std::string& model) {
+    static const char* keywords[] = {
+        "deepseek",  // DeepSeek V4 Pro/Flash, R1, V3
+        "mimo",      // Xiaomi MiMo V2.5, V2.5-Pro, V2-Pro, V2-Omni
+        "glm",       // Zhipu GLM-5, GLM-5.1, GLM-5.2
+        "qwen3",     // Alibaba Qwen 3.x via llama.cpp thinking mode
+        "o1",        // OpenAI o1, o1-mini, o1-pro
+        "o3",        // OpenAI o3, o3-mini, o3-pro
+        "o4",        // OpenAI o4-mini
+        "gpt-5",     // OpenAI GPT-5, GPT-5.1, GPT-5.2, GPT-5.4, GPT-5.5
+    };
+    std::string lower = model;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    for (const auto* kw : keywords) {
+        if (lower.find(kw) != std::string::npos)
+            return true;
+    }
+    return false;
+}

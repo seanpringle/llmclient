@@ -351,3 +351,89 @@ TEST_CASE("Client streaming with tool call delta", "[client]") {
     CHECK(calls[0].name == "read_file");
     CHECK(calls[0].arguments == R"({"path":"test.txt"})");
 }
+
+// ===================================================================
+// build_chat_request tests
+// ===================================================================
+
+TEST_CASE("build_chat_request basic envelope", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "hi"}}};
+    json tools = json::array();
+
+    json payload = client.build_chat_request("test-model", messages, tools, true);
+
+    CHECK(payload["model"] == "test-model");
+    CHECK(payload["messages"] == messages);
+    CHECK(payload["tools"] == tools);
+    CHECK(payload["stream"] == true);
+    CHECK(payload.contains("stream_options"));
+    CHECK(payload["stream_options"]["include_usage"] == true);
+    // Without thinking, should have max_tokens
+    CHECK(payload.contains("max_tokens"));
+    CHECK_FALSE(payload.contains("reasoning_effort"));
+    CHECK_FALSE(payload.contains("thinking"));
+}
+
+TEST_CASE("build_chat_request with thinking enabled for non-OpenAI", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "think"}}};
+
+    json payload = client.build_chat_request("deepseek-v4", messages, json::array(),
+                                             true, 4096, 0, true);
+
+    CHECK(payload["model"] == "deepseek-v4");
+    // Non-OpenAI models use "thinking" param
+    CHECK(payload.contains("thinking"));
+    CHECK(payload["thinking"]["type"] == "enabled");
+    // Should use max_completion_tokens instead of max_tokens
+    CHECK(payload.contains("max_completion_tokens"));
+    CHECK(payload["max_completion_tokens"] == 4096);
+}
+
+TEST_CASE("build_chat_request with thinking for OpenAI model", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "think"}}};
+
+    json payload = client.build_chat_request("o3-mini", messages, json::array(),
+                                             true, 8192, 0, true);
+
+    // OpenAI models use "reasoning_effort" param
+    CHECK(payload.contains("reasoning_effort"));
+    CHECK(payload["reasoning_effort"] == "high");
+    CHECK(payload.contains("max_completion_tokens"));
+    CHECK(payload["max_completion_tokens"] == 8192);
+}
+
+TEST_CASE("build_chat_request derives max_tokens from context_limit", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "hi"}}};
+
+    // When max_tokens_hint is 0 and context_limit is 32000, should use 32000/4 = 8000
+    json payload = client.build_chat_request("test", messages, json::array(),
+                                             true, 0, 32000, false);
+    CHECK(payload["max_tokens"] == 8000);
+}
+
+// ===================================================================
+// model_supports_thinking tests
+// ===================================================================
+
+TEST_CASE("model_supports_thinking known models", "[client]") {
+    CHECK(Client::model_supports_thinking("deepseek-v4"));
+    CHECK(Client::model_supports_thinking("o1-preview"));
+    CHECK(Client::model_supports_thinking("o3-mini"));
+    CHECK(Client::model_supports_thinking("o4-mini"));
+    CHECK(Client::model_supports_thinking("gpt-5-turbo"));
+    CHECK(Client::model_supports_thinking("qwen3-8b"));
+    CHECK(Client::model_supports_thinking("glm-5"));
+    CHECK(Client::model_supports_thinking("mimo-v2.5"));
+}
+
+TEST_CASE("model_supports_thinking unknown models", "[client]") {
+    CHECK_FALSE(Client::model_supports_thinking("gpt-4o"));
+    CHECK_FALSE(Client::model_supports_thinking("claude-3"));
+    CHECK_FALSE(Client::model_supports_thinking("llama-3"));
+    CHECK_FALSE(Client::model_supports_thinking("gemini-pro"));
+    CHECK_FALSE(Client::model_supports_thinking(""));
+}

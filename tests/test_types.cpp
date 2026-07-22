@@ -552,3 +552,70 @@ TEST_CASE("SSEParser raw accumulated data", "[types][sse]") {
     CHECK(parser.raw().find("data:") == 0);
     CHECK(parser.raw().find("{\"a\":1}") != std::string::npos);
 }
+
+// ========================================================================
+// ProtocolMessage tests
+// ========================================================================
+
+TEST_CASE("ProtocolMessage roles", "[types][protocol]") {
+    ProtocolMessage sys;
+    sys.role = "system";
+    sys.content = "You are helpful.";
+    CHECK(sys.role == "system");
+    CHECK(sys.content.value_or("") == "You are helpful.");
+    CHECK(sys.tool_calls.empty());
+
+    ProtocolMessage user;
+    user.role = "user";
+    user.content = "Hello";
+    CHECK(user.role == "user");
+
+    ProtocolMessage asst;
+    asst.role = "assistant";
+    asst.content = std::nullopt;
+    ToolCall tc;
+    tc.id = "call_1";
+    tc.name = "test";
+    tc.arguments = "{}";
+    asst.tool_calls.push_back(tc);
+    CHECK(asst.role == "assistant");
+    CHECK_FALSE(asst.content.has_value());
+    CHECK(asst.tool_calls.size() == 1);
+
+    ProtocolMessage tool;
+    tool.role = "tool";
+    tool.tool_call_id = "call_1";
+    tool.content = "result";
+    CHECK(tool.role == "tool");
+    CHECK(tool.content.value_or("") == "result");
+}
+
+TEST_CASE("ProtocolMessage with tool_calls has null content", "[types][protocol]") {
+    ProtocolMessage pm;
+    pm.role = "assistant";
+    pm.content = std::nullopt;
+    pm.tool_calls.resize(1);
+    CHECK_FALSE(pm.content.has_value());
+}
+
+// ========================================================================
+// make_function_tool tests
+// ========================================================================
+
+TEST_CASE("make_function_tool produces correct JSON shape", "[types][tool]") {
+    json params = {{"type", "object"}, {"properties", {{"path", {{"type", "string"}}}}}};
+    json tool = make_function_tool("read_file", "Read a file", params);
+
+    CHECK(tool["type"] == "function");
+    CHECK(tool["function"]["name"] == "read_file");
+    CHECK(tool["function"]["description"] == "Read a file");
+    CHECK(tool["function"]["parameters"]["type"] == "object");
+    CHECK(tool["function"]["parameters"]["properties"]["path"]["type"] == "string");
+}
+
+TEST_CASE("make_function_tool with empty description", "[types][tool]") {
+    json tool = make_function_tool("noop", "", json::object());
+    CHECK(tool["type"] == "function");
+    CHECK(tool["function"]["name"] == "noop");
+    CHECK(tool["function"]["description"] == "");
+}

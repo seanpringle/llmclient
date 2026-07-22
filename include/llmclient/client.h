@@ -44,6 +44,22 @@ class Client {
     // Query /v1/models and return the list of model IDs (empty on error).
     std::expected<std::vector<std::string>, std::string> fetch_models();
 
+    // ── Payload builders ──
+
+    /// Build a chat completion request payload.
+    /// Handles model, messages, tools, stream flag, max_tokens/max_completion_tokens,
+    /// stream_options, and thinking/reasoning parameters.
+    nlohmann::json build_chat_request(const std::string& model,
+                                      const nlohmann::json& messages,
+                                      const nlohmann::json& tools,
+                                      bool stream,
+                                      int max_tokens_hint = 0,
+                                      int context_limit = 0,
+                                      bool thinking_enabled = false) const;
+
+    /// Returns true if the model name matches known reasoning/thinking model patterns.
+    static bool model_supports_thinking(const std::string& model);
+
     const std::string& last_raw_response() const { return raw_response_; }
     std::string url() const {
         return api_base_ + "/chat/completions";
@@ -57,6 +73,9 @@ class Client {
     struct curl_slist* make_headers() const;
     bool should_retry(long http_code) const;
     CURLcode perform_with_retry(CURL* curl, long& http_code, std::string& body);
+
+    /// Apply thinking/reasoning parameters to a payload.
+    void apply_thinking_params(nlohmann::json& payload, int limit, const std::string& model, bool thinking_enabled) const;
 
     // Low-level HTTP GET helper
     std::expected<std::string, std::string> http_get(const std::string& url);

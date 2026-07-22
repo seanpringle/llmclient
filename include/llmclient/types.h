@@ -116,4 +116,26 @@ class SSEParser {
 
 std::string sanitize_utf8(const std::string& input);
 
+// ---------------------------------------------------------------------------
+// ProtocolMessage — one message in the API conversation (wire format)
+// ---------------------------------------------------------------------------
+
+struct ProtocolMessage {
+    std::string role;                             // system, user, assistant, tool
+    std::optional<std::string> content;           // nullopt for tool_call messages
+    std::vector<ContentPart> parts;               // multipart content (user images)
+    std::vector<ToolCall> tool_calls;             // for assistant tool_call msgs
+    std::string tool_call_id;                     // for tool result messages
+    std::string reasoning_content;                // model-specific, may be empty
+};
+
+/// Build the OpenAI-compatible messages array from a vector of ProtocolMessages.
+nlohmann::json build_openai_payload(const std::vector<ProtocolMessage>& messages,
+                                    const std::string& system_prompt);
+
+/// Build a function tool definition JSON object.
+nlohmann::json make_function_tool(const std::string& name,
+                                  const std::string& description,
+                                  const nlohmann::json& parameters);
+
 } // namespace llmclient
