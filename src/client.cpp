@@ -177,6 +177,20 @@ std::expected<std::string, std::string> llmclient::Client::http_get(const std::s
 
 // ── Discover context window from API metadata ──
 int llmclient::Client::fetch_model_context_limit(const std::string& model) {
+    // Process-wide cache: all sessions share discovered limits
+    // (keyed by URL + model).
+    static std::mutex cache_mutex;
+    static std::unordered_map<std::string, int> cache;
+
+    std::string cache_key = api_base_ + ":" + model;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto it = cache.find(cache_key);
+        if (it != cache.end()) {
+            return it->second;
+        }
+    }
+
     auto body = http_get(models_url());
     if (!body) {
         return 0;
@@ -228,11 +242,20 @@ int llmclient::Client::fetch_model_context_limit(const std::string& model) {
         if (it != model_obj.end() && it->is_number_integer()) {
             int val = it->get<int>();
             if (val > 0) {
+                // Cache the result before returning.
+                std::lock_guard<std::mutex> lock(cache_mutex);
+                cache[cache_key] = val;
                 return val;
             }
         }
     }
 
+    // Model found but no context window field. Cache a zero so we don't
+    // re-query on every request — the caller will use its own default.
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        cache[cache_key] = 0;
+    }
     return 0;
 }
 

@@ -276,6 +276,88 @@ TEST_CASE("Client fetch_model_context_limit bad URL returns 0", "[client]") {
 }
 
 // ===================================================================
+// fetch_model_context_limit caching
+// ===================================================================
+
+TEST_CASE("Client fetch_model_context_limit caches second call", "[client]") {
+    std::atomic<int> call_count{0};
+    MockServer server([&](const std::string& req) -> std::string {
+        call_count++;
+        if (req.find("/v1/models") != std::string::npos) {
+            return R"({"object":"list","data":[
+                {"id":"test-model","object":"model","context_window":16000}
+            ]})";
+        }
+        return R"({"error":"unexpected"})";
+    });
+
+    Client client(server.base_url());
+
+    // First call — should hit the server
+    int first = client.fetch_model_context_limit("test-model");
+    CHECK(first == 16000);
+    CHECK(call_count == 1);
+
+    // Second call with same model — should use cache
+    int second = client.fetch_model_context_limit("test-model");
+    CHECK(second == 16000);
+    CHECK(call_count == 1); // no additional HTTP request
+}
+
+TEST_CASE("Client fetch_model_context_limit separate cache entries per model", "[client]") {
+    std::atomic<int> call_count{0};
+    MockServer server([&](const std::string& req) -> std::string {
+        call_count++;
+        if (req.find("/v1/models") != std::string::npos) {
+            return R"({"object":"list","data":[
+                {"id":"model-a","object":"model","context_window":8000},
+                {"id":"model-b","object":"model","context_window":32000}
+            ]})";
+        }
+        return R"({"error":"unexpected"})";
+    });
+
+    Client client(server.base_url());
+
+    int a = client.fetch_model_context_limit("model-a");
+    CHECK(a == 8000);
+    CHECK(call_count == 1);
+
+    int b = client.fetch_model_context_limit("model-b");
+    CHECK(b == 32000);
+    CHECK(call_count == 2); // different model, new request
+}
+
+TEST_CASE("Client fetch_model_context_limit separate cache per base URL", "[client]") {
+    int call_count_a = 0, call_count_b = 0;
+    MockServer server_a([&](const std::string& req) -> std::string {
+        call_count_a++;
+        if (req.find("/v1/models") != std::string::npos)
+            return R"({"object":"list","data":[{"id":"m","object":"model","context_window":8000}]})";
+        return R"({"error":"unexpected"})";
+    });
+    MockServer server_b([&](const std::string& req) -> std::string {
+        call_count_b++;
+        if (req.find("/v1/models") != std::string::npos)
+            return R"({"object":"list","data":[{"id":"m","object":"model","context_window":16000}]})";
+        return R"({"error":"unexpected"})";
+    });
+
+    Client client_a(server_a.base_url());
+    Client client_b(server_b.base_url());
+
+    CHECK(client_a.fetch_model_context_limit("m") == 8000);
+    CHECK(call_count_a == 1);
+
+    CHECK(client_b.fetch_model_context_limit("m") == 16000);
+    CHECK(call_count_b == 1);
+
+    // Calling client_a again with same model should return cached value
+    CHECK(client_a.fetch_model_context_limit("m") == 8000);
+    CHECK(call_count_a == 1); // no new request to server_a
+}
+
+// ===================================================================
 // Retry behavior
 // ===================================================================
 
