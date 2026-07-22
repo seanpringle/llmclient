@@ -619,3 +619,118 @@ TEST_CASE("make_function_tool with empty description", "[types][tool]") {
     CHECK(tool["function"]["name"] == "noop");
     CHECK(tool["function"]["description"] == "");
 }
+
+// ========================================================================
+// build_openai_payload tests
+// ========================================================================
+
+TEST_CASE("build_openai_payload full conversation with tool calls", "[types][payload]") {
+    // Build a full conversation: user(text)+user(image)+assistant(tc)+tool result
+    ProtocolMessage user_text;
+    user_text.role = "user";
+    user_text.content = "Look at this";
+
+    ProtocolMessage user_img;
+    user_img.role = "user";
+    ContentPart img;
+    img.type = ContentPartType::Image;
+    img.data = "dGVzdA==";
+    img.media_type = "image/png";
+    user_img.parts.push_back(img);
+
+    ToolCall tc;
+    tc.id = "call_1";
+    tc.name = "describe";
+    tc.arguments = R"({"param":"val"})";
+
+    ProtocolMessage asst;
+    asst.role = "assistant";
+    asst.content = std::nullopt;
+    asst.reasoning_content = "I need to describe this image.";
+    asst.tool_calls.push_back(tc);
+
+    ProtocolMessage tool_result;
+    tool_result.role = "tool";
+    tool_result.tool_call_id = "call_1";
+    tool_result.content = "A beautiful landscape";
+
+    std::vector<ProtocolMessage> msgs = {user_text, user_img, asst, tool_result};
+
+    json payload = build_openai_payload(msgs, "You are helpful.");
+    // system + user(text) + user(img) + assistant + tool = 5
+    REQUIRE(payload.is_array());
+    REQUIRE(payload.size() == 5);
+
+    // Check system prompt
+    CHECK(payload[0]["role"] == "system");
+    CHECK(payload[0]["content"] == "You are helpful.");
+
+    // Text-only user message (should be array form due to force_multipart from the image)
+    CHECK(payload[1]["role"] == "user");
+    CHECK(payload[1]["content"].is_array());
+    CHECK(payload[1]["content"][0]["type"] == "text");
+    CHECK(payload[1]["content"][0]["text"] == "Look at this");
+
+    // Image user message
+    CHECK(payload[2]["role"] == "user");
+    CHECK(payload[2]["content"].is_array());
+    CHECK(payload[2]["content"][0]["type"] == "image_url");
+    CHECK(payload[2]["content"][0]["image_url"]["url"] == "data:image/png;base64,dGVzdA==");
+
+    // Assistant with tool_calls
+    CHECK(payload[3]["role"] == "assistant");
+    CHECK(payload[3]["content"] == nullptr);
+    CHECK(payload[3]["reasoning_content"] == "I need to describe this image.");
+    REQUIRE(payload[3]["tool_calls"].is_array());
+    CHECK(payload[3]["tool_calls"][0]["id"] == "call_1");
+    CHECK(payload[3]["tool_calls"][0]["type"] == "function");
+    CHECK(payload[3]["tool_calls"][0]["function"]["name"] == "describe");
+    CHECK(payload[3]["tool_calls"][0]["function"]["arguments"] == R"({"param":"val"})");
+
+    // Tool result
+    CHECK(payload[4]["role"] == "tool");
+    CHECK(payload[4]["tool_call_id"] == "call_1");
+    CHECK(payload[4]["content"] == "A beautiful landscape");
+}
+
+TEST_CASE("build_openai_payload forces array-form on user messages when any multipart", "[types][payload]") {
+    ProtocolMessage text_only_first;
+    text_only_first.role = "user";
+    text_only_first.content = "Just text";
+
+    ProtocolMessage text_only_second;
+    text_only_second.role = "user";
+    text_only_second.content = "More text";
+
+    // No multipart — should get flat content
+    json payload = build_openai_payload({text_only_first, text_only_second}, "test");
+    CHECK(payload[1]["content"].is_string());
+    CHECK(payload[2]["content"].is_string());
+
+    // Add a third user message with an image
+    ProtocolMessage img_user;
+    img_user.role = "user";
+    ContentPart img;
+    img.type = ContentPartType::Image;
+    img.data = "x";
+    img.media_type = "image/gif";
+    img_user.parts.push_back(img);
+
+    payload = build_openai_payload({text_only_first, img_user, text_only_second}, "test");
+    // First text msg now forced to array
+    CHECK(payload[1]["role"] == "user");
+    CHECK(payload[1]["content"].is_array());
+    CHECK(payload[1]["content"][0]["type"] == "text");
+    CHECK(payload[1]["content"][0]["text"] == "Just text");
+
+    // Image user
+    CHECK(payload[2]["role"] == "user");
+    CHECK(payload[2]["content"].is_array());
+    CHECK(payload[2]["content"][0]["type"] == "image_url");
+
+    // Second text msg also forced to array
+    CHECK(payload[3]["role"] == "user");
+    CHECK(payload[3]["content"].is_array());
+    CHECK(payload[3]["content"][0]["type"] == "text");
+    CHECK(payload[3]["content"][0]["text"] == "More text");
+}
