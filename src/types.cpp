@@ -1,17 +1,153 @@
 #include "llmclient/types.h"
 
+#include <algorithm>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
 #include <string_view>
 
+namespace llmclient {
+
+// ---------------------------------------------------------------------------
+// Usage JSON deserialization
+// ---------------------------------------------------------------------------
+
+void from_json(const nlohmann::json& j, Usage& u) {
+    u.prompt_tokens = j.value("prompt_tokens", 0);
+    u.completion_tokens = j.value("completion_tokens", 0);
+    u.total_tokens = j.value("total_tokens", 0);
+}
+
+// ---------------------------------------------------------------------------
+// ToolAccumulator — merges streaming tool_call deltas across SSE chunks
+//
+// OpenAI streaming format emits tool_calls as incremental delta fragments.
+// Each chunk carries an "index" to identify which call it belongs to, and
+// "arguments" are accumulated by appending successive string fragments.
+// ---------------------------------------------------------------------------
+
+void ToolAccumulator::apply(const nlohmann::json& delta) {
+    auto it = delta.find("tool_calls");
+    if (it == delta.end() || !it->is_array()) {
+        return;
+    }
+
+    for (const auto& tc : *it) {
+        int idx = tc.value("index", 0);
+        auto& call = calls_[idx];
+        call.index = idx;
+
+        auto id_it = tc.find("id");
+        if (id_it != tc.end() && id_it->is_string()) {
+            call.id = id_it->get<std::string>();
+        }
+
+        auto func_it = tc.find("function");
+        if (func_it != tc.end() && func_it->is_object()) {
+            auto name_it = func_it->find("name");
+            if (name_it != func_it->end() && name_it->is_string()) {
+                call.name = name_it->get<std::string>();
+            }
+            auto args_it = func_it->find("arguments");
+            if (args_it != func_it->end() && args_it->is_string()) {
+                call.arguments += args_it->get<std::string>();
+            }
+        }
+    }
+}
+
+std::vector<ToolCall> ToolAccumulator::finalize() const {
+    std::vector<ToolCall> result;
+    result.reserve(calls_.size());
+    for (const auto& [idx, tc] : calls_) {
+        result.push_back(tc);
+    }
+    std::sort(result.begin(), result.end(), [](const ToolCall& a, const ToolCall& b) { return a.index < b.index; });
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// is_valid_cont — helper: true if byte is a valid UTF-8 continuation byte
+// ---------------------------------------------------------------------------
+
+static bool is_valid_cont(unsigned char c) {
+    return (c & 0xC0) == 0x80;
+}
+
+// ---------------------------------------------------------------------------
+// sanitize_utf8 — ensure valid UTF-8 by replacing invalid sequences
+// ---------------------------------------------------------------------------
+
+std::string sanitize_utf8(const std::string& input) {
+    // Validates and fixes up UTF-8 by replacing invalid byte sequences
+    // with the Unicode replacement character (U+FFFD) encoded as UTF-8.
+    // Based on the approach from skeleton/helpers.h.
+    std::string result;
+    result.reserve(input.size());
+
+    size_t i = 0;
+    while (i < input.size()) {
+        unsigned char c = static_cast<unsigned char>(input[i]);
+
+        if (c <= 0x7F) {
+            // 1-byte sequence (ASCII)
+            result += input[i];
+            i++;
+        } else if (c >= 0xC2 && c <= 0xDF) {
+            // 2-byte sequence
+            if (i + 1 >= input.size() || !is_valid_cont(static_cast<unsigned char>(input[i + 1]))) {
+                result += "\xEF\xBF\xBD"; // replacement character
+                i++;
+            } else {
+                result += input[i];
+                result += input[i + 1];
+                i += 2;
+            }
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            // 3-byte sequence
+            if (i + 2 >= input.size() ||
+                !is_valid_cont(static_cast<unsigned char>(input[i + 1])) ||
+                !is_valid_cont(static_cast<unsigned char>(input[i + 2]))) {
+                result += "\xEF\xBF\xBD";
+                i++;
+            } else {
+                result += input[i];
+                result += input[i + 1];
+                result += input[i + 2];
+                i += 3;
+            }
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            // 4-byte sequence
+            if (i + 3 >= input.size() ||
+                !is_valid_cont(static_cast<unsigned char>(input[i + 1])) ||
+                !is_valid_cont(static_cast<unsigned char>(input[i + 2])) ||
+                !is_valid_cont(static_cast<unsigned char>(input[i + 3]))) {
+                result += "\xEF\xBF\xBD";
+                i++;
+            } else {
+                result += input[i];
+                result += input[i + 1];
+                result += input[i + 2];
+                result += input[i + 3];
+                i += 4;
+            }
+        } else {
+            // Invalid start byte
+            result += "\xEF\xBF\xBD";
+            i++;
+        }
+    }
+
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // SSEParser
 // ---------------------------------------------------------------------------
 
-llmclient::SSEParser::SSEParser(Callbacks cb) : cb_(std::move(cb)) {}
+SSEParser::SSEParser(Callbacks cb) : cb_(std::move(cb)) {}
 
-void llmclient::SSEParser::feed(const char* data, size_t len) {
+void SSEParser::feed(const char* data, size_t len) {
     raw_.append(data, len);
     buf_.append(data, len);
 
@@ -27,7 +163,7 @@ void llmclient::SSEParser::feed(const char* data, size_t len) {
     }
 }
 
-void llmclient::SSEParser::process_line(std::string line) {
+void SSEParser::process_line(std::string line) {
     // Strip trailing \r if present
     if (!line.empty() && line.back() == '\r') {
         line.pop_back();
@@ -102,15 +238,17 @@ void llmclient::SSEParser::process_line(std::string line) {
     // Ignore other fields (:keepalive, etc.)
 }
 
-void llmclient::SSEParser::flush() {
+void SSEParser::flush() {
     if (!buf_.empty()) {
         process_line(std::move(buf_));
         buf_.clear();
     }
 }
 
-void llmclient::SSEParser::reset() {
+void SSEParser::reset() {
     buf_.clear();
     raw_.clear();
     current_event_.clear();
 }
+
+} // namespace llmclient
