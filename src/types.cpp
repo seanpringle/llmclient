@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 #include <exception>
+#include <expected>
+#include <set>
 #include <stdexcept>
 #include <string_view>
 
@@ -521,6 +523,9 @@ nlohmann::json build_openai_payload(const std::vector<ProtocolMessage>& messages
 // ---------------------------------------------------------------------------
 // make_function_tool — build a function tool definition JSON object
 // ---------------------------------------------------------------------------
+// Deprecated: prefer constructing a ToolDef and calling to_json(td) instead.
+// Kept for backward compatibility with existing tests; will be moved to
+// json_helpers.h in a future cleanup pass.
 
 nlohmann::json make_function_tool(const std::string& name,
                                   const std::string& description,
@@ -536,11 +541,90 @@ nlohmann::json make_function_tool(const std::string& name,
 }
 
 // ---------------------------------------------------------------------------
+// ToolDef validation
+// ---------------------------------------------------------------------------
+
+static const std::set<std::string> kValidParamTypes = {"string", "integer", "boolean", "number"};
+
+std::expected<void, std::string> ToolDef::validate() const {
+    if (name.empty()) {
+        return std::unexpected("ToolDef name is empty");
+    }
+
+    bool has_params = !params.empty();
+    bool has_raw = !raw_schema.empty();
+
+    if (has_params && has_raw) {
+        return std::unexpected("ToolDef \"" + name +
+                               "\": params and raw_schema are mutually exclusive");
+    }
+
+    if (has_raw) {
+        // Validate raw_schema is well-formed JSON (schema structure not checked).
+        try {
+            [[maybe_unused]] auto _ = nlohmann::json::parse(raw_schema);
+        } catch (const nlohmann::json::parse_error& e) {
+            return std::unexpected("ToolDef \"" + name +
+                                   "\": raw_schema is not valid JSON: " + std::string(e.what()));
+        }
+    }
+
+    if (has_params) {
+        std::set<std::string> names;
+        for (const auto& p : params) {
+            if (p.name.empty()) {
+                return std::unexpected("ToolDef \"" + name + "\": ParamDef name is empty");
+            }
+            if (!names.insert(p.name).second) {
+                return std::unexpected("ToolDef \"" + name + "\": duplicate ParamDef name \"" +
+                                       p.name + "\"");
+            }
+            if (!kValidParamTypes.count(p.type)) {
+                return std::unexpected("ToolDef \"" + name + "\": ParamDef \"" + p.name +
+                                       "\" has invalid type \"" + p.type +
+                                       "\" (expected: string, integer, boolean, number)");
+            }
+        }
+    }
+
+    return {};
+}
+
+// ---------------------------------------------------------------------------
 // ToolDef serialization
 // ---------------------------------------------------------------------------
 
 void to_json(nlohmann::json& j, const ToolDef& td) {
-    j = make_function_tool(td.name, td.description, td.parameters);
+    nlohmann::json parameters;
+
+    if (!td.raw_schema.empty()) {
+        // Path 2: raw JSON Schema string — parse and embed directly.
+        // validate() already verified this is well-formed JSON.
+        parameters = nlohmann::json::parse(td.raw_schema);
+    } else {
+        // Path 1: build the envelope from typed params.
+        parameters["type"] = "object";
+        nlohmann::json props = nlohmann::json::object();
+        nlohmann::json required = nlohmann::json::array();
+
+        for (const auto& p : td.params) {
+            props[p.name] = {{"type", p.type}, {"description", p.description}};
+            if (p.required) {
+                required.push_back(p.name);
+            }
+        }
+        parameters["properties"] = std::move(props);
+        parameters["required"] = std::move(required);
+    }
+
+    j = {
+        {"type", "function"},
+        {"function", {
+            {"name", td.name},
+            {"description", td.description},
+            {"parameters", std::move(parameters)}
+        }}
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +745,10 @@ nlohmann::json to_json(const ChatRequest& req) {
     }
 
     return payload;
+}
+
+std::string to_json_string(const ChatRequest& req) {
+    return to_json(req).dump();
 }
 
 } // namespace llmclient

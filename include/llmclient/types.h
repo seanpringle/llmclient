@@ -1,5 +1,6 @@
 #pragma once
 
+#include <expected>
 #include <functional>
 #include <optional>
 #include <string>
@@ -184,18 +185,55 @@ nlohmann::json build_openai_payload(const std::vector<ProtocolMessage>& messages
                                     const std::string& system_prompt);
 
 /// Build a function tool definition JSON object.
+/// Deprecated: prefer constructing a ToolDef and calling to_json(td) instead.
+/// Kept for backward compatibility; will be moved to json_helpers.h in a future
+/// cleanup pass.
 nlohmann::json make_function_tool(const std::string& name,
                                   const std::string& description,
                                   const nlohmann::json& parameters);
 
 // ---------------------------------------------------------------------------
-// ToolDef — strongly-typed tool definition (replaces raw make_function_tool)
+// ParamDef — typed parameter definition for simple tools
+// ---------------------------------------------------------------------------
+// Preferred over raw JSON Schema for built-in Cima tools.  llmclient validates
+// these and builds the {"type":"object","properties":{...},"required":[...]}
+// envelope automatically.
+//
+// Path 2 (raw_schema) is the escape hatch for tools that need features beyond
+// this struct: enums, defaults, format, arrays, nested objects, $ref, etc.
+
+struct ParamDef {
+    std::string name;           // non-empty, unique within a ToolDef
+    std::string type;           // "string" | "integer" | "boolean" | "number"
+    std::string description;    // may be empty
+    bool required = false;
+};
+
+// ---------------------------------------------------------------------------
+// ToolDef — strongly-typed tool definition
 // ---------------------------------------------------------------------------
 
 struct ToolDef {
     std::string name;
     std::string description;
-    nlohmann::json parameters;     // JSON Schema — inherently flexible
+
+    // Path 1 (preferred): Typed parameters.  llmclient validates and serializes
+    // into the standard JSON Schema envelope.  Empty vector = tool takes no
+    // arguments.
+    std::vector<ParamDef> params;
+
+    // Path 2: Raw JSON Schema string for complex or externally-discovered
+    // tools.  When non-empty, this is used INSTEAD of params.  Must be valid
+    // JSON (validated by validate()).  The schema structure is NOT validated
+    // beyond well-formed JSON.
+    //
+    // This is the escape hatch for MCP tools, or any built-in tool whose
+    // schema needs features beyond ParamDef (enums, defaults, arrays, nesting).
+    std::string raw_schema;
+
+    /// Validate the tool definition.  Must be called before serialization.
+    /// Returns an error string on failure, or an empty optional on success.
+    std::expected<void, std::string> validate() const;
 };
 
 void to_json(nlohmann::json& j, const ToolDef& td);
@@ -239,5 +277,9 @@ struct ChatRequest {
 
 /// Serialize a ChatRequest to an OpenAI-compatible JSON payload.
 nlohmann::json to_json(const ChatRequest& req);
+
+/// Serialize a ChatRequest to a JSON string (pre-serialized).
+/// Equivalent to to_json(req).dump() but avoids exposing nlohmann::json in the API.
+std::string to_json_string(const ChatRequest& req);
 
 } // namespace llmclient

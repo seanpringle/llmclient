@@ -577,7 +577,7 @@ TEST_CASE("to_json(ChatRequest) includes and preserves valid tools array", "[cli
     ToolDef td;
     td.name = "get_weather";
     td.description = "Get weather";
-    td.parameters = nlohmann::json::object();
+    // No params — empty typed params produces the empty object schema
     req.tools.push_back(std::move(td));
 
     json payload = to_json(req);
@@ -682,17 +682,34 @@ TEST_CASE("to_json(ChatRequest) with reasoning_effort override", "[client]") {
     CHECK(payload["reasoning_effort"] == "low");
 }
 
-TEST_CASE("to_json(ToolDef) matches make_function_tool", "[client]") {
+TEST_CASE("to_json(ToolDef) produces valid tool definition", "[client]") {
+    // Typed path: empty params
     ToolDef td;
     td.name = "test_tool";
     td.description = "A test tool";
-    td.parameters = {{"type", "object"}, {"properties", {}}};
 
     json from_td;
     to_json(from_td, td);
-    json from_mft = make_function_tool("test_tool", "A test tool", {{"type", "object"}, {"properties", {}}});
 
-    CHECK(from_td == from_mft);
+    CHECK(from_td["type"] == "function");
+    CHECK(from_td["function"]["name"] == "test_tool");
+    CHECK(from_td["function"]["description"] == "A test tool");
+    CHECK(from_td["function"]["parameters"]["type"] == "object");
+    CHECK(from_td["function"]["parameters"]["properties"].is_object());
+}
+
+TEST_CASE("to_json(ToolDef) raw_schema path", "[client]") {
+    ToolDef td;
+    td.name = "raw_tool";
+    td.description = "Uses raw schema";
+    td.raw_schema = R"({"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]})";
+
+    json from_td;
+    to_json(from_td, td);
+
+    CHECK(from_td["function"]["parameters"]["type"] == "object");
+    CHECK(from_td["function"]["parameters"]["properties"]["x"]["type"] == "integer");
+    CHECK(from_td["function"]["parameters"]["required"][0] == "x");
 }
 
 TEST_CASE("Client build_chat_request delegates to to_json", "[client]") {
