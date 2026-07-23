@@ -48,7 +48,12 @@ void from_json(const nlohmann::json& j, ChatResponse& r) {
     const auto& choice = (*choices)[0];
     r.finish_reason = choice.value("finish_reason", "");
 
-    const auto& message = choice["message"];
+    // message may be absent in unconventional responses
+    auto msg_it = choice.find("message");
+    if (msg_it == choice.end() || !msg_it->is_object()) {
+        return;
+    }
+    const auto& message = *msg_it;
     // content may be null (for tool_call messages)
     auto content_it = message.find("content");
     if (content_it != message.end() && !content_it->is_null()) {
