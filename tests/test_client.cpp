@@ -587,6 +587,10 @@ TEST_CASE("to_json(ChatRequest) includes and preserves valid tools array", "[cli
     CHECK(payload["tools"].size() == 1);
     CHECK(payload["tools"][0]["type"] == "function");
     CHECK(payload["tools"][0]["function"]["name"] == "get_weather");
+    // Empty params must produce a proper JSON Schema object, not null
+    CHECK(payload["tools"][0]["function"]["parameters"]["type"] == "object");
+    CHECK(payload["tools"][0]["function"]["parameters"]["properties"].is_object());
+    CHECK(payload["tools"][0]["function"]["parameters"]["required"].is_array());
 }
 
 TEST_CASE("to_json(ChatRequest) with thinking enabled for non-OpenAI", "[client]") {
