@@ -49,6 +49,12 @@ class Client {
     /// Build a chat completion request payload.
     /// Handles model, messages, tools, stream flag, max_tokens/max_completion_tokens,
     /// stream_options, and thinking/reasoning parameters.
+    ///
+    /// @param tools  JSON array of tool definitions, or `nullptr`/empty array to
+    ///               indicate no tools.  Non-array, non-null values throw
+    ///               `std::invalid_argument`.  When null or empty, the `tools` key
+    ///               is omitted from the request payload.
+    /// @throws std::invalid_argument  if tools is not a JSON array and not null
     nlohmann::json build_chat_request(const std::string& model,
                                       const nlohmann::json& messages,
                                       const nlohmann::json& tools,

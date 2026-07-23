@@ -528,7 +528,8 @@ TEST_CASE("build_chat_request basic envelope", "[client]") {
 
     CHECK(payload["model"] == "test-model");
     CHECK(payload["messages"] == messages);
-    CHECK(payload["tools"] == tools);
+    // Empty tools array → key omitted
+    CHECK_FALSE(payload.contains("tools"));
     CHECK(payload["stream"] == true);
     CHECK(payload.contains("stream_options"));
     CHECK(payload["stream_options"]["include_usage"] == true);
@@ -536,6 +537,71 @@ TEST_CASE("build_chat_request basic envelope", "[client]") {
     CHECK(payload.contains("max_tokens"));
     CHECK_FALSE(payload.contains("reasoning_effort"));
     CHECK_FALSE(payload.contains("thinking"));
+}
+
+TEST_CASE("build_chat_request rejects tools as object", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "hi"}}};
+    CHECK_THROWS_AS(client.build_chat_request("test", messages, json::object(), true),
+                    std::invalid_argument);
+}
+
+TEST_CASE("build_chat_request rejects tools as string", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "hi"}}};
+    CHECK_THROWS_AS(client.build_chat_request("test", messages, json("not_an_array"), true),
+                    std::invalid_argument);
+}
+
+TEST_CASE("build_chat_request rejects tools as number", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "hi"}}};
+    CHECK_THROWS_AS(client.build_chat_request("test", messages, json(42), true),
+                    std::invalid_argument);
+}
+
+TEST_CASE("build_chat_request rejects tools as boolean", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "hi"}}};
+    CHECK_THROWS_AS(client.build_chat_request("test", messages, json(true), true),
+                    std::invalid_argument);
+}
+
+TEST_CASE("build_chat_request omits empty tools array", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "hi"}}};
+    // No throw for empty array
+    CHECK_NOTHROW(client.build_chat_request("test", messages, json::array(), true));
+    json payload = client.build_chat_request("test", messages, json::array(), true);
+    CHECK_FALSE(payload.contains("tools"));
+}
+
+TEST_CASE("build_chat_request omits null tools via nullptr", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "hi"}}};
+    json payload = client.build_chat_request("test", messages, nullptr, true);
+    CHECK_FALSE(payload.contains("tools"));
+}
+
+TEST_CASE("build_chat_request omits null tools via default-constructed json", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "hi"}}};
+    json null_tools;  // default-constructed → null
+    CHECK_NOTHROW(client.build_chat_request("test", messages, null_tools, true));
+    json payload = client.build_chat_request("test", messages, null_tools, true);
+    CHECK_FALSE(payload.contains("tools"));
+}
+
+TEST_CASE("build_chat_request includes and preserves valid tools array", "[client]") {
+    Client client("http://example.com/v1");
+    json messages = {{{"role", "user"}, {"content", "hi"}}};
+    json tools = json::array();
+    tools.push_back(make_function_tool("get_weather", "Get weather", {}));
+    json payload = client.build_chat_request("test", messages, tools, true);
+    CHECK(payload.contains("tools"));
+    CHECK(payload["tools"].is_array());
+    CHECK(payload["tools"].size() == 1);
+    CHECK(payload["tools"] == tools);  // content fidelity
 }
 
 TEST_CASE("build_chat_request with thinking enabled for non-OpenAI", "[client]") {

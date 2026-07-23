@@ -3,6 +3,7 @@
 #include <cstring>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <thread>
 #include <chrono>
 
@@ -486,13 +487,24 @@ nlohmann::json llmclient::Client::build_chat_request(const std::string& model,
                                                      int max_tokens_hint,
                                                      int context_limit,
                                                      bool thinking_enabled) const {
+    // Validate: tools must be null (no tools) or a JSON array.
+    if (!tools.is_null() && !tools.is_array()) {
+        throw std::invalid_argument(
+            "tools must be a JSON array or null, got " + std::string(tools.type_name()));
+    }
+
     nlohmann::json payload = {
         {"model", model},
         {"messages", messages},
-        {"tools", tools},
         {"stream", stream},
         {"stream_options", {{"include_usage", true}}}
     };
+
+    // Omit the tools key entirely when null or empty — the API spec allows
+    // omitting the field when there are no tools.
+    if (!tools.is_null() && !tools.empty()) {
+        payload["tools"] = tools;
+    }
 
     int limit = max_tokens_hint > 0 ? max_tokens_hint
         : (context_limit > 0 ? std::min(context_limit / 4, 32768) : 32768);
