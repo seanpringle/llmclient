@@ -10,19 +10,13 @@ using namespace llmclient;
 // ToolAccumulator tests
 // ========================================================================
 
-TEST_CASE("ToolAccumulator single chunk with all fields", "[types][toolacc]") {
+TEST_CASE("ToolAccumulator single ToolCallDelta with all fields", "[types][toolacc]") {
     ToolAccumulator acc;
-    json delta = json::parse(R"({
-        "tool_calls": [{
-            "index": 0,
-            "id": "call_abc",
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "arguments": "{\"path\": \"test.txt\"}"
-            }
-        }]
-    })");
+    ToolCallDelta delta;
+    delta.index = 0;
+    delta.id = "call_abc";
+    delta.name = "read_file";
+    delta.arguments_fragment = R"({"path": "test.txt"})";
     acc.apply(delta);
 
     REQUIRE(acc.has_calls());
@@ -39,36 +33,24 @@ TEST_CASE("ToolAccumulator multi-chunk arguments concatenation",
     ToolAccumulator acc;
 
     // Chunk 1: id + name + empty args
-    acc.apply(json::parse(R"({
-        "tool_calls": [{
-            "index": 0,
-            "id": "call_xyz",
-            "function": {
-                "name": "read_file",
-                "arguments": ""
-            }
-        }]
-    })"));
+    ToolCallDelta d1;
+    d1.index = 0;
+    d1.id = "call_xyz";
+    d1.name = "read_file";
+    d1.arguments_fragment = "";
+    acc.apply(d1);
 
     // Chunk 2: partial args fragment
-    acc.apply(json::parse(R"({
-        "tool_calls": [{
-            "index": 0,
-            "function": {
-                "arguments": "{\"path\":"
-            }
-        }]
-    })"));
+    ToolCallDelta d2;
+    d2.index = 0;
+    d2.arguments_fragment = R"({"path":)";
+    acc.apply(d2);
 
     // Chunk 3: rest of args
-    acc.apply(json::parse(R"({
-        "tool_calls": [{
-            "index": 0,
-            "function": {
-                "arguments": " \"/etc/hosts\"}"
-            }
-        }]
-    })"));
+    ToolCallDelta d3;
+    d3.index = 0;
+    d3.arguments_fragment = R"( "/etc/hosts"})";
+    acc.apply(d3);
 
     REQUIRE(acc.has_calls());
     auto calls = acc.finalize();
@@ -78,43 +60,44 @@ TEST_CASE("ToolAccumulator multi-chunk arguments concatenation",
     CHECK(calls[0].arguments == R"({"path": "/etc/hosts"})");
 }
 
-TEST_CASE("ToolAccumulator no tool_calls in delta", "[types][toolacc]") {
+TEST_CASE("ToolAccumulator empty ToolCallDelta does not create call", "[types][toolacc]") {
     ToolAccumulator acc;
-    json delta = json::parse(R"({"content": "hello"})");
-    acc.apply(delta);
-    CHECK_FALSE(acc.has_calls());
-}
-
-TEST_CASE("ToolAccumulator empty delta", "[types][toolacc]") {
-    ToolAccumulator acc;
-    json delta = json::object();
-    acc.apply(delta);
+    // No apply calls — should not have any calls
     CHECK_FALSE(acc.has_calls());
 }
 
 TEST_CASE("ToolAccumulator multiple parallel tool calls", "[types][toolacc]") {
     ToolAccumulator acc;
 
-    // Chunk with two tool call starts
-    acc.apply(json::parse(R"({
-        "tool_calls": [
-            {"index": 0, "id": "call_1", "function": {"name": "read_file", "arguments": "{\"pat"}},
-            {"index": 1, "id": "call_2", "function": {"name": "grep_files", "arguments": "{\"patt"}}
-        ]
-    })"));
+    // First chunk for both calls
+    ToolCallDelta d1;
+    d1.index = 0;
+    d1.id = "call_1";
+    d1.name = "read_file";
+    d1.arguments_fragment = R"({"pat)";
+    acc.apply(d1);
 
-    // Chunk with continued args
-    acc.apply(json::parse(R"({
-        "tool_calls": [
-            {"index": 0, "function": {"arguments": "h\": \"test.txt\"}"}},
-            {"index": 1, "function": {"arguments": "ern\": \"foo\"}"}}
-        ]
-    })"));
+    ToolCallDelta d2;
+    d2.index = 1;
+    d2.id = "call_2";
+    d2.name = "grep_files";
+    d2.arguments_fragment = R"({"patt)";
+    acc.apply(d2);
+
+    // Continuation chunks
+    ToolCallDelta d1b;
+    d1b.index = 0;
+    d1b.arguments_fragment = R"(h": "test.txt"})";
+    acc.apply(d1b);
+
+    ToolCallDelta d2b;
+    d2b.index = 1;
+    d2b.arguments_fragment = R"(ern": "foo"})";
+    acc.apply(d2b);
 
     auto calls = acc.finalize();
     REQUIRE(calls.size() == 2);
 
-    // finalize() returns calls sorted by index
     CHECK(calls[0].index == 0);
     CHECK(calls[0].id == "call_1");
     CHECK(calls[0].name == "read_file");
@@ -124,6 +107,31 @@ TEST_CASE("ToolAccumulator multiple parallel tool calls", "[types][toolacc]") {
     CHECK(calls[1].id == "call_2");
     CHECK(calls[1].name == "grep_files");
     CHECK(calls[1].arguments == R"({"pattern": "foo"})");
+}
+
+TEST_CASE("ToolAccumulator overwrites id and name when present", "[types][toolacc]") {
+    ToolAccumulator acc;
+
+    ToolCallDelta d1;
+    d1.index = 0;
+    d1.id = "call_old";
+    d1.name = "old_name";
+    d1.arguments_fragment = "{}";
+    acc.apply(d1);
+
+    // Fragment updates id and name
+    ToolCallDelta d2;
+    d2.index = 0;
+    d2.id = "call_new";
+    d2.name = "new_name";
+    d2.arguments_fragment = R"({"key":"val"})";
+    acc.apply(d2);
+
+    auto calls = acc.finalize();
+    REQUIRE(calls.size() == 1);
+    CHECK(calls[0].id == "call_new");       // overwritten
+    CHECK(calls[0].name == "new_name");     // overwritten
+    CHECK(calls[0].arguments == R"({}{"key":"val"})"); // concatenated
 }
 
 // ========================================================================
@@ -544,95 +552,103 @@ TEST_CASE("sanitize_utf8 mixed valid and invalid sequences", "[types][utf8]") {
 // ========================================================================
 
 TEST_CASE("SSEParser single complete event", "[types][sse]") {
-    std::vector<json> received;
+    std::vector<StreamDelta> deltas;
     bool done = false;
 
     SSEParser parser(SSEParser::Callbacks{
-        .on_data = [&](const std::string&, const json& j) { received.push_back(j); },
         .on_done = [&]() { done = true; },
         .on_error = [&](const std::string& e) { FAIL(e); },
+        .on_delta = [&](const StreamDelta& d) { deltas.push_back(d); },
     });
 
-    parser.feed("data: {\"key\":\"value\"}\n\n", 24);
-    REQUIRE(received.size() == 1);
-    CHECK(received[0]["key"] == "value");
+    parser.feed("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n", 51);
+    REQUIRE(deltas.size() == 1);
+    CHECK(deltas[0].content.has_value());
+    CHECK(*deltas[0].content == "Hello");
     CHECK_FALSE(done);
 }
 
 TEST_CASE("SSEParser multiple events in one feed", "[types][sse]") {
-    std::vector<json> received;
+    std::vector<std::string> contents;
     bool done = false;
 
     SSEParser parser(SSEParser::Callbacks{
-        .on_data = [&](const std::string&, const json& j) { received.push_back(j); },
         .on_done = [&]() { done = true; },
         .on_error = [&](const std::string& e) { FAIL(e); },
+        .on_delta = [&](const StreamDelta& d) {
+            if (d.content) contents.push_back(*d.content);
+        },
     });
 
-    parser.feed("data: {\"a\":1}\n\ndata: {\"b\":2}\n\ndata: [DONE]\n\n", 46);
-    REQUIRE(received.size() == 2);
-    CHECK(received[0]["a"] == 1);
-    CHECK(received[1]["b"] == 2);
+    parser.feed("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\ndata: [DONE]\n\n", 117);
+    REQUIRE(contents.size() == 2);
+    CHECK(contents[0] == "Hello");
+    CHECK(contents[1] == " world");
     CHECK(done);
 }
 
 TEST_CASE("SSEParser partial data across feed calls", "[types][sse]") {
-    std::vector<json> received;
+    std::vector<std::string> contents;
     bool done = false;
-    std::string error;
 
     SSEParser parser(SSEParser::Callbacks{
-        .on_data = [&](const std::string&, const json& j) { received.push_back(j); },
         .on_done = [&]() { done = true; },
-        .on_error = [&](const std::string& e) { error = e; },
+        .on_error = [&](const std::string& e) { FAIL(e); },
+        .on_delta = [&](const StreamDelta& d) {
+            if (d.content) contents.push_back(*d.content);
+        },
     });
 
-    parser.feed("data: {\"k", 9);
-    CHECK(received.empty());
+    parser.feed("data: {\"choices\":[", 18);
+    CHECK(contents.empty());
 
-    parser.feed("ey\":1}\n\n", 8);
-    REQUIRE(received.size() == 1);
-    CHECK(received[0]["key"] == 1);
+    parser.feed("{\"delta\":{\"content\":\"Hello\"}}]}\n\n", 33);
+    REQUIRE(contents.size() == 1);
+    CHECK(contents[0] == "Hello");
 }
 
 TEST_CASE("SSEParser ignores non-data lines", "[types][sse]") {
-    std::vector<json> received;
+    std::vector<std::string> contents;
 
     SSEParser parser(SSEParser::Callbacks{
-        .on_data = [&](const std::string&, const json& j) { received.push_back(j); },
         .on_done = []() {},
         .on_error = [&](const std::string& e) { FAIL(e); },
+        .on_delta = [&](const StreamDelta& d) {
+            if (d.content) contents.push_back(*d.content);
+        },
     });
 
-    parser.feed("event: test\ndata: {\"x\":1}\n\n", 28);
-    REQUIRE(received.size() == 1);
-    CHECK(received[0]["x"] == 1);
+    parser.feed("event: test\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n", 63);
+    REQUIRE(contents.size() == 1);
+    CHECK(contents[0] == "Hello");
 }
 
 TEST_CASE("SSEParser reset clears state", "[types][sse]") {
-    std::vector<json> received;
+    std::vector<std::string> contents;
 
     SSEParser parser(SSEParser::Callbacks{
-        .on_data = [&](const std::string&, const json& j) { received.push_back(j); },
         .on_done = []() {},
         .on_error = [&](const std::string& e) { FAIL(e); },
+        .on_delta = [&](const StreamDelta& d) {
+            if (d.content) contents.push_back(*d.content);
+        },
     });
 
-    parser.feed("data: {\"a\":1}", 13);  // incomplete (no \n), stays buffered
+    parser.feed("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]", 48);  // incomplete, stays buffered
     parser.reset();
-    parser.feed("data: {\"b\":2}\n\n", 15);
+    parser.feed("data: {\"choices\":[{\"delta\":{\"content\":\"World\"}}]}\n\n", 51);
 
-    REQUIRE(received.size() == 1);
-    CHECK(received[0]["b"] == 2);
+    REQUIRE(contents.size() == 1);
+    CHECK(contents[0] == "World");
 }
 
 TEST_CASE("SSEParser malformed JSON calls on_error", "[types][sse]") {
     bool errored = false;
 
     SSEParser parser(SSEParser::Callbacks{
-        .on_data = [](const std::string&, const json&) {},
         .on_done = []() {},
         .on_error = [&](const std::string&) { errored = true; },
+        .on_delta = [](const StreamDelta&) {},
     });
 
     parser.feed("data: {invalid}\n\n", 17);
@@ -640,81 +656,151 @@ TEST_CASE("SSEParser malformed JSON calls on_error", "[types][sse]") {
 }
 
 TEST_CASE("SSEParser flush processes remaining buffered data", "[types][sse]") {
-    std::vector<json> received;
+    std::vector<std::string> contents;
     bool done = false;
 
     SSEParser parser(SSEParser::Callbacks{
-        .on_data = [&](const std::string&, const json& j) { received.push_back(j); },
         .on_done = [&]() { done = true; },
         .on_error = [&](const std::string& e) { FAIL(e); },
+        .on_delta = [&](const StreamDelta& d) {
+            if (d.content) contents.push_back(*d.content);
+        },
     });
 
-    // Feed partial data: first event is complete (has \n\n), [DONE] lacks trailing \n
-    parser.feed("data: {\"key\":\"value\"}\n\ndata: [DONE]", 35);
+    parser.feed("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: [DONE]", 63);
 
-    // The first event was already processed by line-splitting;
-    // "data: [DONE]" has no trailing \n so it stays buffered.
-    REQUIRE(received.size() == 1);
-    CHECK(received[0]["key"] == "value");
+    REQUIRE(contents.size() == 1);
+    CHECK(contents[0] == "Hello");
     CHECK_FALSE(done);
 
-    // flush() processes the remaining "[DONE]" line
     parser.flush();
-
-    CHECK(received.size() == 1);  // no new data events
-    CHECK(done);                  // [DONE] was processed
+    CHECK(contents.size() == 1);
+    CHECK(done);
 }
 
 TEST_CASE("SSEParser flush handles partial non-DONE data", "[types][sse]") {
-    std::vector<json> received;
-    bool done = false;
-    std::string error;
+    std::vector<std::string> contents;
+    bool errored = false;
 
     SSEParser parser(SSEParser::Callbacks{
-        .on_data = [&](const std::string&, const json& j) { received.push_back(j); },
-        .on_done = [&]() { done = true; },
-        .on_error = [&](const std::string& e) { error = e; },
+        .on_done = []() {},
+        .on_error = [&](const std::string&) { errored = true; },
+        .on_delta = [&](const StreamDelta& d) {
+            if (d.content) contents.push_back(*d.content);
+        },
     });
 
-    // A content line without trailing \n (connection closed mid-stream)
     parser.feed("data: {\"msg\":\"hello\"}", 21);
-    CHECK(received.empty());  // nothing processed yet
+    CHECK(contents.empty());
 
     parser.flush();
-    REQUIRE(received.size() == 1);
-    CHECK(received[0]["msg"] == "hello");
-    CHECK_FALSE(done);
-    CHECK(error.empty());
+    CHECK(contents.empty());
+    CHECK_FALSE(errored);
 }
 
 TEST_CASE("SSEParser flush with no buffered data is safe", "[types][sse]") {
     SSEParser parser(SSEParser::Callbacks{
-        .on_data = [](const std::string&, const json&) {},
         .on_done = []() {},
         .on_error = [](const std::string&) {},
+        .on_delta = [](const StreamDelta&) {},
     });
 
-    // flush with empty buffer should not crash
     parser.flush();
-    // flush after well-formed complete data should not crash
-    parser.feed("data: {\"x\":1}\n\n", 13);
+    parser.feed("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n", 47);
     parser.flush();
-    // flush after reset should not crash
     parser.reset();
     parser.flush();
 }
 
 TEST_CASE("SSEParser raw accumulated data", "[types][sse]") {
     SSEParser parser(SSEParser::Callbacks{
-        .on_data = [](const std::string&, const json&) {},
         .on_done = []() {},
         .on_error = [](const std::string&) {},
+        .on_delta = [](const StreamDelta&) {},
     });
 
-    parser.feed("data: {\"a\":1}\n\n", 16);
-    // raw() should contain the accumulated input
-    CHECK(parser.raw().find("data:") == 0);
-    CHECK(parser.raw().find("{\"a\":1}") != std::string::npos);
+    parser.feed("data: {\"choices\":[{\"delta\":{\"content\":\"X\"}}]}\n\n", 47);
+    CHECK(parser.raw().find("content") != std::string::npos);
+}
+
+TEST_CASE("SSEParser finish_reason fires on_finish", "[types][sse]") {
+    std::string finish_reason;
+    bool done = false;
+
+    SSEParser parser(SSEParser::Callbacks{
+        .on_done = [&]() { done = true; },
+        .on_error = [&](const std::string& e) { FAIL(e); },
+        .on_delta = [](const StreamDelta&) {},
+        .on_finish = [&](std::string_view r) { finish_reason = std::string(r); },
+    });
+
+    parser.feed("data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n\ndata: [DONE]\n\n", 71);
+
+    CHECK(finish_reason == "stop");
+    CHECK(done);
+}
+
+TEST_CASE("SSEParser on_delta with reasoning_content", "[types][sse]") {
+    std::string reasoning;
+    std::string content;
+
+    SSEParser parser(SSEParser::Callbacks{
+        .on_done = []() {},
+        .on_error = [&](const std::string& e) { FAIL(e); },
+        .on_delta = [&](const StreamDelta& d) {
+            if (d.reasoning_content) reasoning = *d.reasoning_content;
+            if (d.content) content = *d.content;
+        },
+    });
+
+    parser.feed("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Thinking...\",\"content\":\"Answer\"}}]}\n\n", 86);
+
+    CHECK(reasoning == "Thinking...");
+    CHECK(content == "Answer");
+}
+
+TEST_CASE("SSEParser on_delta with reasoning (alternate field name)", "[types][sse]") {
+    std::string reasoning;
+
+    SSEParser parser(SSEParser::Callbacks{
+        .on_done = []() {},
+        .on_error = [&](const std::string& e) { FAIL(e); },
+        .on_delta = [&](const StreamDelta& d) {
+            if (d.reasoning_content) reasoning = *d.reasoning_content;
+        },
+    });
+
+    parser.feed("data: {\"choices\":[{\"delta\":{\"reasoning\":\"Thinking...\"}}]}\n\n", 59);
+
+    CHECK(reasoning == "Thinking...");
+}
+
+TEST_CASE("SSEParser on_delta with tool_calls", "[types][sse]") {
+    int delta_count = 0;
+    ToolAccumulator acc;
+
+    SSEParser parser(SSEParser::Callbacks{
+        .on_done = []() {},
+        .on_error = [&](const std::string& e) { FAIL(e); },
+        .on_delta = [&](const StreamDelta& d) {
+            if (d.tool_calls) {
+                for (const auto& tc : *d.tool_calls) {
+                    delta_count++;
+                    acc.apply(tc);
+                }
+            }
+        },
+    });
+
+    parser.feed("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"test\",\"arguments\":\"\"}}]}}]}\n\n"
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]}}]}\n\n", 216);
+
+    CHECK(delta_count == 2);
+    auto calls = acc.finalize();
+    REQUIRE(calls.size() == 1);
+    CHECK(calls[0].id == "call_1");
+    CHECK(calls[0].name == "test");
+    CHECK(calls[0].arguments == "{}");
 }
 
 // ========================================================================

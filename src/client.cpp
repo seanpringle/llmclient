@@ -360,12 +360,6 @@ std::expected<void, std::string> llmclient::Client::stream_chat_impl(const nlohm
     // We must not retry if callbacks were invoked — retrying would duplicate data.
     bool data_delivered = false;
     SSEParser::Callbacks guarded;
-    if (callbacks.on_data) {
-        guarded.on_data = [&data_delivered, cb = std::move(callbacks.on_data)](const std::string& ev, const nlohmann::json& j) {
-            data_delivered = true;
-            cb(ev, j);
-        };
-    }
     if (callbacks.on_done) {
         guarded.on_done = [&data_delivered, cb = std::move(callbacks.on_done)]() {
             data_delivered = true;
@@ -378,23 +372,17 @@ std::expected<void, std::string> llmclient::Client::stream_chat_impl(const nlohm
             cb(s);
         };
     }
-    // ── Forward structured streaming callbacks ──
-    if (callbacks.on_content_delta) {
-        guarded.on_content_delta = [&data_delivered, cb = std::move(callbacks.on_content_delta)](std::string_view t) {
-            data_delivered = true;
-            cb(t);
-        };
-    }
-    if (callbacks.on_reasoning_delta) {
-        guarded.on_reasoning_delta = [&data_delivered, cb = std::move(callbacks.on_reasoning_delta)](std::string_view t) {
-            data_delivered = true;
-            cb(t);
-        };
-    }
-    if (callbacks.on_tool_call_delta) {
-        guarded.on_tool_call_delta = [&data_delivered, cb = std::move(callbacks.on_tool_call_delta)](const nlohmann::json& d) {
+    // ── Forward consolidated streaming callbacks ──
+    if (callbacks.on_delta) {
+        guarded.on_delta = [&data_delivered, cb = std::move(callbacks.on_delta)](const StreamDelta& d) {
             data_delivered = true;
             cb(d);
+        };
+    }
+    if (callbacks.on_finish) {
+        guarded.on_finish = [&data_delivered, cb = std::move(callbacks.on_finish)](std::string_view r) {
+            data_delivered = true;
+            cb(r);
         };
     }
     if (callbacks.on_usage) {

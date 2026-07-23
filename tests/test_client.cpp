@@ -90,7 +90,7 @@ TEST_CASE("Client non-streaming no auth when key empty", "[client]") {
 // Streaming chat
 // ===================================================================
 
-TEST_CASE("Client streaming calls on_done", "[client]") {
+TEST_CASE("Client streaming calls on_delta", "[client]") {
     MockServer server(
         [](const std::string&) -> std::string {
             return "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\ndata: [DONE]\n\n";
@@ -104,7 +104,9 @@ TEST_CASE("Client streaming calls on_done", "[client]") {
     bool errored = false;
 
     SSEParser::Callbacks cbs;
-    cbs.on_content_delta = [&](std::string_view t) { content += std::string(t); };
+    cbs.on_delta = [&](const StreamDelta& d) {
+        if (d.content) content += *d.content;
+    };
     cbs.on_done = [&]() { done = true; };
     cbs.on_error = [&](const std::string&) { errored = true; };
 
@@ -128,7 +130,7 @@ TEST_CASE("Client streaming calls on_error for bad JSON", "[client]") {
 
     bool errored = false;
     SSEParser::Callbacks cbs;
-    cbs.on_content_delta = [](std::string_view) {};
+    cbs.on_delta = [](const StreamDelta&) {};
     cbs.on_done = []() {};
     cbs.on_error = [&](const std::string&) { errored = true; };
 
@@ -143,7 +145,7 @@ TEST_CASE("Client streaming calls on_error for bad JSON", "[client]") {
 // Structured streaming callbacks through Client
 // ===================================================================
 
-TEST_CASE("Client streaming structured callbacks fire correctly", "[client]") {
+TEST_CASE("Client streaming on_delta fires correctly", "[client]") {
     // SSE with content, reasoning, tool calls, usage, and [DONE]
     MockServer server(
         [](const std::string&) -> std::string {
@@ -166,9 +168,16 @@ TEST_CASE("Client streaming structured callbacks fire correctly", "[client]") {
     bool errored = false;
 
     SSEParser::Callbacks cbs;
-    cbs.on_content_delta = [&](std::string_view t) { content += std::string(t); };
-    cbs.on_reasoning_delta = [&](std::string_view t) { reasoning += std::string(t); };
-    cbs.on_tool_call_delta = [&](const json& d) { tool_call_count++; tool_acc.apply(d); };
+    cbs.on_delta = [&](const StreamDelta& d) {
+        if (d.content) content += *d.content;
+        if (d.reasoning_content) reasoning += *d.reasoning_content;
+        if (d.tool_calls) {
+            for (const auto& tc : *d.tool_calls) {
+                tool_call_count++;
+                tool_acc.apply(tc);
+            }
+        }
+    };
     cbs.on_done = [&]() { done = true; };
     cbs.on_error = [&](const std::string&) { errored = true; };
     cbs.on_usage = [&](Usage u) {
@@ -383,10 +392,12 @@ TEST_CASE("Client cancellation during streaming stops mid-stream", "[client]") {
 
     std::string content;
     SSEParser::Callbacks cbs;
-    cbs.on_content_delta = [&](std::string_view t) {
-        content += std::string(t);
-        // Cancel after receiving first data
-        *cancelled = true;
+    cbs.on_delta = [&](const StreamDelta& d) {
+        if (d.content) {
+            content += *d.content;
+            // Cancel after receiving first data
+            *cancelled = true;
+        }
     };
     cbs.on_done = []() {};
     cbs.on_error = [](const std::string&) {};
@@ -418,7 +429,13 @@ TEST_CASE("Client streaming with tool call delta", "[client]") {
     bool done = false;
 
     SSEParser::Callbacks cbs;
-    cbs.on_tool_call_delta = [&](const json& d) { acc.apply(d); };
+    cbs.on_delta = [&](const StreamDelta& d) {
+        if (d.tool_calls) {
+            for (const auto& tc : *d.tool_calls) {
+                acc.apply(tc);
+            }
+        }
+    };
     cbs.on_done = [&]() { done = true; };
     cbs.on_error = [](const std::string&) {};
 

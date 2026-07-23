@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -85,9 +86,35 @@ struct ChatResponse {
 
 void from_json(const nlohmann::json& j, ChatResponse& r);
 
+// ---------------------------------------------------------------------------
+// ToolCallDelta — a single streaming tool-call delta fragment
+// ---------------------------------------------------------------------------
+
+struct ToolCallDelta {
+    int index;
+    std::optional<std::string> id;               // set on first fragment for this index
+    std::optional<std::string> name;             // set on first fragment for this index
+    std::optional<std::string> arguments_fragment; // partial args, appended to accumulated string
+};
+
+// ---------------------------------------------------------------------------
+// StreamDelta — consolidated delta for one streaming chunk
+// ---------------------------------------------------------------------------
+// finish_reason is NOT here — delivered via SSEParser::Callbacks::on_finish.
+
+struct StreamDelta {
+    std::optional<std::string> content;
+    std::optional<std::string> reasoning_content;
+    std::optional<std::vector<ToolCallDelta>> tool_calls;
+};
+
+// ---------------------------------------------------------------------------
+// ToolAccumulator — merges streaming tool_call deltas across SSE chunks
+// ---------------------------------------------------------------------------
+
 class ToolAccumulator {
   public:
-    void apply(const nlohmann::json& delta);
+    void apply(const ToolCallDelta& delta);
     bool has_calls() const { return !calls_.empty(); }
     std::vector<ToolCall> finalize() const;
 
@@ -101,27 +128,19 @@ class ToolAccumulator {
 
 class SSEParser {
   public:
-    using DataCallback = std::function<void(const std::string& event, const nlohmann::json& data)>;
     using DoneCallback = std::function<void()>;
     using ErrorCallback = std::function<void(const std::string&)>;
 
     struct Callbacks {
-        DataCallback on_data;
         DoneCallback on_done;
         ErrorCallback on_error;
 
-        // ── Structured streaming callbacks (optional, OpenAI delta format) ──
-        // These are called in addition to on_data when the JSON carries the
-        // corresponding field.  They save consumers from manually extracting
-        // fields from the delta JSON.
+        /// Called once per chunk with the consolidated delta.
+        std::function<void(const StreamDelta& delta)> on_delta;
 
-        /// Called for each content delta chunk.
-        std::function<void(std::string_view text)> on_content_delta;
-        /// Called for reasoning content delta (both `reasoning_content` and
-        /// `reasoning` field names are checked).
-        std::function<void(std::string_view text)> on_reasoning_delta;
-        /// Called for each tool_calls delta fragment (raw JSON array element).
-        std::function<void(const nlohmann::json& delta)> on_tool_call_delta;
+        /// Streaming finish_reason — fires on the final chunk (before on_done).
+        std::function<void(std::string_view reason)> on_finish;
+
         /// Called once with the final usage object.
         std::function<void(Usage u)> on_usage;
     };

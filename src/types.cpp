@@ -160,33 +160,18 @@ bool any_user_multipart(const std::vector<std::string>& roles,
 // "arguments" are accumulated by appending successive string fragments.
 // ---------------------------------------------------------------------------
 
-void ToolAccumulator::apply(const nlohmann::json& delta) {
-    auto it = delta.find("tool_calls");
-    if (it == delta.end() || !it->is_array()) {
-        return;
+void ToolAccumulator::apply(const ToolCallDelta& delta) {
+    auto& call = calls_[delta.index];
+    call.index = delta.index;
+
+    if (delta.id.has_value()) {
+        call.id = delta.id.value();
     }
-
-    for (const auto& tc : *it) {
-        int idx = tc.value("index", 0);
-        auto& call = calls_[idx];
-        call.index = idx;
-
-        auto id_it = tc.find("id");
-        if (id_it != tc.end() && id_it->is_string()) {
-            call.id = id_it->get<std::string>();
-        }
-
-        auto func_it = tc.find("function");
-        if (func_it != tc.end() && func_it->is_object()) {
-            auto name_it = func_it->find("name");
-            if (name_it != func_it->end() && name_it->is_string()) {
-                call.name = name_it->get<std::string>();
-            }
-            auto args_it = func_it->find("arguments");
-            if (args_it != func_it->end() && args_it->is_string()) {
-                call.arguments += args_it->get<std::string>();
-            }
-        }
+    if (delta.name.has_value()) {
+        call.name = delta.name.value();
+    }
+    if (delta.arguments_fragment.has_value()) {
+        call.arguments += delta.arguments_fragment.value();
     }
 }
 
@@ -343,47 +328,70 @@ void SSEParser::process_line(std::string line) {
         try {
             nlohmann::json j = nlohmann::json::parse(payload);
             try {
-                if (cb_.on_data) {
-                    cb_.on_data(current_event_, j);
-                }
-
-                // ── Structured delta extraction (OpenAI streaming format) ──
-                // Only process data events that carry choices with delta.
+                // ── Consolidated delta extraction (OpenAI streaming format) ──
                 if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
-                    const auto& delta = j["choices"][0]["delta"];
+                    const auto& choice = j["choices"][0];
+                    const auto& delta = choice["delta"];
 
-                    auto extract_str = [&](const std::string& key) -> std::string_view {
-                        auto it = delta.find(key);
-                        if (it != delta.end() && it->is_string()) {
-                            auto& s = it->get_ref<const std::string&>();
-                            return std::string_view(s);
+                    // Finish reason (sibling of delta, not inside it)
+                    auto fr_it = choice.find("finish_reason");
+                    if (fr_it != choice.end() && !fr_it->is_null()) {
+                        if (cb_.on_finish) {
+                            std::string reason = fr_it->get<std::string>();
+                            cb_.on_finish(reason);
                         }
-                        return {};
-                    };
-
-                    // Content delta
-                    if (cb_.on_content_delta) {
-                        auto text = extract_str("content");
-                        if (!text.empty())
-                            cb_.on_content_delta(text);
                     }
 
-                    // Reasoning delta — check both `reasoning_content` and `reasoning`
-                    if (cb_.on_reasoning_delta) {
-                        auto text = extract_str("reasoning_content");
-                        if (text.empty())
-                            text = extract_str("reasoning");
-                        if (!text.empty())
-                            cb_.on_reasoning_delta(text);
-                    }
+                    // Build StreamDelta
+                    if (cb_.on_delta) {
+                        StreamDelta sd;
 
-                    // Tool calls delta — pass the full delta so consumers
-                    // can use ToolAccumulator::apply().
-                    if (cb_.on_tool_call_delta) {
+                        auto extract_str = [&](const std::string& key) -> std::optional<std::string> {
+                            auto it = delta.find(key);
+                            if (it != delta.end() && it->is_string()) {
+                                return it->get<std::string>();
+                            }
+                            return std::nullopt;
+                        };
+
+                        sd.content = extract_str("content");
+
+                        // Reasoning — check both `reasoning_content` and `reasoning`
+                        auto r = extract_str("reasoning_content");
+                        if (!r.has_value()) {
+                            r = extract_str("reasoning");
+                        }
+                        sd.reasoning_content = std::move(r);
+
+                        // Tool calls
                         auto tc_it = delta.find("tool_calls");
                         if (tc_it != delta.end() && tc_it->is_array()) {
-                            cb_.on_tool_call_delta(delta);
+                            std::vector<ToolCallDelta> tcs;
+                            for (const auto& tc_json : *tc_it) {
+                                ToolCallDelta tcd;
+                                tcd.index = tc_json.value("index", 0);
+
+                                auto id_it = tc_json.find("id");
+                                if (id_it != tc_json.end() && id_it->is_string())
+                                    tcd.id = id_it->get<std::string>();
+
+                                auto func_it = tc_json.find("function");
+                                if (func_it != tc_json.end() && func_it->is_object()) {
+                                    auto name_it = func_it->find("name");
+                                    if (name_it != func_it->end() && name_it->is_string())
+                                        tcd.name = name_it->get<std::string>();
+
+                                    auto args_it = func_it->find("arguments");
+                                    if (args_it != func_it->end() && args_it->is_string())
+                                        tcd.arguments_fragment = args_it->get<std::string>();
+                                }
+
+                                tcs.push_back(std::move(tcd));
+                            }
+                            sd.tool_calls = std::move(tcs);
                         }
+
+                        cb_.on_delta(sd);
                     }
                 }
 
