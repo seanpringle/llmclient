@@ -289,6 +289,90 @@ TEST_CASE("Client fetch_model_context_limit bad URL returns 0", "[client]") {
 }
 
 // ===================================================================
+// All supported context window field name patterns
+// ===================================================================
+
+TEST_CASE("fetch_model_context_limit reads context_window", "[client]") {
+    MockServer server([](const std::string& req) -> std::string {
+        if (req.find("/v1/models") != std::string::npos)
+            return R"({"data":[{"id":"m","context_window":16384}]})";
+        return "";
+    });
+    Client client(server.base_url());
+    CHECK(client.fetch_model_context_limit("m") == 16384);
+}
+
+TEST_CASE("fetch_model_context_limit reads max_model_len", "[client]") {
+    MockServer server([](const std::string& req) -> std::string {
+        if (req.find("/v1/models") != std::string::npos)
+            return R"({"data":[{"id":"m","max_model_len":32768}]})";
+        return "";
+    });
+    Client client(server.base_url());
+    CHECK(client.fetch_model_context_limit("m") == 32768);
+}
+
+TEST_CASE("fetch_model_context_limit reads max_context_length", "[client]") {
+    MockServer server([](const std::string& req) -> std::string {
+        if (req.find("/v1/models") != std::string::npos)
+            return R"({"data":[{"id":"m","max_context_length":8192}]})";
+        return "";
+    });
+    Client client(server.base_url());
+    CHECK(client.fetch_model_context_limit("m") == 8192);
+}
+
+TEST_CASE("fetch_model_context_limit reads context_length", "[client]") {
+    MockServer server([](const std::string& req) -> std::string {
+        if (req.find("/v1/models") != std::string::npos)
+            return R"({"data":[{"id":"m","context_length":4096}]})";
+        return "";
+    });
+    Client client(server.base_url());
+    CHECK(client.fetch_model_context_limit("m") == 4096);
+}
+
+TEST_CASE("fetch_model_context_limit reads inputTokenLimit", "[client]") {
+    MockServer server([](const std::string& req) -> std::string {
+        if (req.find("/v1/models") != std::string::npos)
+            return R"({"data":[{"id":"m","inputTokenLimit":128000}]})";
+        return "";
+    });
+    Client client(server.base_url());
+    CHECK(client.fetch_model_context_limit("m") == 128000);
+}
+
+TEST_CASE("fetch_model_context_limit reads max_input_tokens", "[client]") {
+    MockServer server([](const std::string& req) -> std::string {
+        if (req.find("/v1/models") != std::string::npos)
+            return R"({"data":[{"id":"m","max_input_tokens":100000}]})";
+        return "";
+    });
+    Client client(server.base_url());
+    CHECK(client.fetch_model_context_limit("m") == 100000);
+}
+
+TEST_CASE("fetch_model_context_limit reads max_total_tokens", "[client]") {
+    MockServer server([](const std::string& req) -> std::string {
+        if (req.find("/v1/models") != std::string::npos)
+            return R"({"data":[{"id":"m","max_total_tokens":64000}]})";
+        return "";
+    });
+    Client client(server.base_url());
+    CHECK(client.fetch_model_context_limit("m") == 64000);
+}
+
+TEST_CASE("fetch_model_context_limit zero on unrecognized field", "[client]") {
+    MockServer server([](const std::string& req) -> std::string {
+        if (req.find("/v1/models") != std::string::npos)
+            return R"({"data":[{"id":"m","some_unknown_field":999}]})";
+        return "";
+    });
+    Client client(server.base_url());
+    CHECK(client.fetch_model_context_limit("m") == 0);
+}
+
+// ===================================================================
 // fetch_model_context_limit caching
 // ===================================================================
 

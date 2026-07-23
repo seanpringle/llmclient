@@ -4,6 +4,7 @@
 #include <iostream>
 #include <random>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <chrono>
 
@@ -177,6 +178,18 @@ std::expected<std::string, std::string> llmclient::Client::http_get(const std::s
 }
 
 // ── Discover context window from API metadata ──
+
+// Known context-window field names across backends, in priority order.
+static constexpr std::string_view kContextWindowFields[] = {
+    "context_window",
+    "max_model_len",
+    "max_context_length",
+    "context_length",
+    "inputTokenLimit",
+    "max_input_tokens",
+    "max_total_tokens",
+};
+
 int llmclient::Client::fetch_model_context_limit(const std::string& model) {
     // Process-wide cache: all sessions share discovered limits
     // (keyed by URL + model).
@@ -228,17 +241,7 @@ int llmclient::Client::fetch_model_context_limit(const std::string& model) {
     }
 
     // Known field names across backends, in priority order
-    static const char* const kContextFields[] = {
-        "context_window",
-        "max_model_len",
-        "max_context_length",
-        "context_length",
-        "inputTokenLimit",
-        "max_input_tokens",
-        "max_total_tokens",
-    };
-
-    for (const auto& field : kContextFields) {
+    for (const auto& field : kContextWindowFields) {
         auto it = model_obj.find(field);
         if (it != model_obj.end() && it->is_number_integer()) {
             int val = it->get<int>();
