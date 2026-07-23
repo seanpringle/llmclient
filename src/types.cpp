@@ -16,6 +16,62 @@ void from_json(const nlohmann::json& j, Usage& u) {
     u.prompt_tokens = j.value("prompt_tokens", 0);
     u.completion_tokens = j.value("completion_tokens", 0);
     u.total_tokens = j.value("total_tokens", 0);
+    u.cache_read_input_tokens = j.value("cache_read_input_tokens", 0);
+    u.cache_creation_input_tokens = j.value("cache_creation_input_tokens", 0);
+    // reasoning_tokens is nested under completion_tokens_details
+    u.reasoning_tokens = 0;
+    auto details = j.find("completion_tokens_details");
+    if (details != j.end() && details->is_object()) {
+        u.reasoning_tokens = details->value("reasoning_tokens", 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ChatResponse JSON deserialization
+// ---------------------------------------------------------------------------
+
+void from_json(const nlohmann::json& j, ChatResponse& r) {
+    r.id = j.value("id", "");
+    r.model = j.value("model", "");
+
+    // Parse usage (may be absent)
+    auto usage_it = j.find("usage");
+    if (usage_it != j.end() && usage_it->is_object()) {
+        r.usage = usage_it->get<Usage>();
+    }
+
+    // Parse choices[0]
+    auto choices = j.find("choices");
+    if (choices == j.end() || !choices->is_array() || choices->empty()) {
+        return; // leave defaults
+    }
+    const auto& choice = (*choices)[0];
+    r.finish_reason = choice.value("finish_reason", "");
+
+    const auto& message = choice["message"];
+    // content may be null (for tool_call messages)
+    auto content_it = message.find("content");
+    if (content_it != message.end() && !content_it->is_null()) {
+        r.content = content_it->get<std::string>();
+    }
+    r.reasoning_content = message.value("reasoning_content", "");
+
+    // Parse tool_calls — non-streaming has no "index" field, synthesize from position
+    auto tc_it = message.find("tool_calls");
+    if (tc_it != message.end() && tc_it->is_array()) {
+        int idx = 0;
+        for (const auto& tc_json : *tc_it) {
+            ToolCall tc;
+            tc.index = idx++;
+            tc.id = tc_json.value("id", "");
+            auto func = tc_json.find("function");
+            if (func != tc_json.end() && func->is_object()) {
+                tc.name = func->value("name", "");
+                tc.arguments = func->value("arguments", "");
+            }
+            r.tool_calls.push_back(std::move(tc));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +520,134 @@ nlohmann::json make_function_tool(const std::string& name,
             {"parameters", parameters}
         }}
     };
+}
+
+// ---------------------------------------------------------------------------
+// ToolDef serialization
+// ---------------------------------------------------------------------------
+
+void to_json(nlohmann::json& j, const ToolDef& td) {
+    j = make_function_tool(td.name, td.description, td.parameters);
+}
+
+// ---------------------------------------------------------------------------
+// ChatRequest serialization
+// ---------------------------------------------------------------------------
+
+nlohmann::json to_json(const ChatRequest& req) {
+    // Build messages array
+    nlohmann::json arr = nlohmann::json::array();
+
+    // Inject system prompt if set
+    if (req.system_prompt.has_value() && !req.system_prompt->empty()) {
+        arr.push_back({{"role", "system"}, {"content", sanitize_utf8(*req.system_prompt)}});
+    }
+
+    // Check if any user message uses multipart content — forces all user
+    // messages to use array form.
+    bool force_multipart = false;
+    for (const auto& msg : req.messages) {
+        if (msg.role == "user" && has_multipart_content(msg.parts)) {
+            force_multipart = true;
+            break;
+        }
+    }
+
+    for (const auto& msg : req.messages) {
+        if (msg.role == "assistant" && !msg.tool_calls.empty()) {
+            // Assistant with tool calls — expand into assistant message
+            nlohmann::json j;
+            j["role"] = "assistant";
+            j["content"] = nullptr;
+            if (!msg.reasoning_content.empty()) {
+                j["reasoning_content"] = sanitize_utf8(msg.reasoning_content);
+            }
+
+            nlohmann::json tc_arr = nlohmann::json::array();
+            for (const auto& tc : msg.tool_calls) {
+                nlohmann::json tc_json;
+                tc_json["id"] = tc.id;
+                tc_json["type"] = "function";
+                tc_json["function"] = {{"name", tc.name}, {"arguments", tc.arguments}};
+                tc_arr.push_back(std::move(tc_json));
+            }
+            j["tool_calls"] = std::move(tc_arr);
+            arr.push_back(std::move(j));
+        } else if (msg.role == "tool") {
+            nlohmann::json j;
+            j["role"] = "tool";
+            j["tool_call_id"] = msg.tool_call_id;
+            j["content"] = sanitize_utf8(msg.content.value_or(""));
+            arr.push_back(std::move(j));
+        } else if (msg.role == "user" && (has_multipart_content(msg.parts) || force_multipart)) {
+            nlohmann::json j;
+            j["role"] = "user";
+            if (has_multipart_content(msg.parts)) {
+                j["content"] = build_content_array(msg.parts);
+            } else {
+                nlohmann::json content_arr = nlohmann::json::array();
+                content_arr.push_back({{"type", "text"}, {"text", sanitize_utf8(msg.content.value_or(""))}});
+                j["content"] = std::move(content_arr);
+            }
+            arr.push_back(std::move(j));
+        } else {
+            nlohmann::json j;
+            j["role"] = msg.role;
+            j["content"] = sanitize_utf8(msg.content.value_or(""));
+
+            if (msg.role == "assistant" && !msg.reasoning_content.empty()) {
+                j["reasoning_content"] = sanitize_utf8(msg.reasoning_content);
+            }
+
+            arr.push_back(std::move(j));
+        }
+    }
+
+    // Build tool definitions array
+    nlohmann::json tools_arr = nlohmann::json::array();
+    for (const auto& td : req.tools) {
+        nlohmann::json td_json;
+        to_json(td_json, td);
+        tools_arr.push_back(std::move(td_json));
+    }
+
+    // Construct the full payload
+    nlohmann::json payload = {
+        {"model", req.model},
+        {"messages", std::move(arr)},
+        {"stream", req.stream},
+        {"stream_options", {{"include_usage", req.include_usage}}}
+    };
+
+    // Omit tools key entirely when empty
+    if (!tools_arr.empty()) {
+        payload["tools"] = std::move(tools_arr);
+    }
+
+    // Compute token limit
+    int limit = req.max_tokens > 0 ? req.max_tokens
+        : (req.context_limit > 0 ? std::min(req.context_limit / 4, 32768) : 32768);
+
+    // Apply thinking/reasoning parameters
+    if (req.thinking_enabled) {
+        std::string lower = req.model;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        bool is_openai = lower.find("o1") != std::string::npos
+                      || lower.find("o3") != std::string::npos
+                      || lower.find("o4") != std::string::npos
+                      || lower.find("gpt-5") != std::string::npos;
+        if (is_openai) {
+            // Use reasoning_effort from request if set, otherwise default to "high"
+            payload["reasoning_effort"] = req.reasoning_effort.value_or("high");
+        } else {
+            payload["thinking"] = {{"type", "enabled"}};
+        }
+        payload["max_completion_tokens"] = limit;
+    } else {
+        payload["max_tokens"] = limit;
+    }
+
+    return payload;
 }
 
 } // namespace llmclient

@@ -61,13 +61,29 @@ struct Usage {
     int prompt_tokens = 0;
     int completion_tokens = 0;
     int total_tokens = 0;
+    int reasoning_tokens = 0;             // from completion_tokens_details (OpenAI)
+    int cache_read_input_tokens = 0;      // top-level (Anthropic)
+    int cache_creation_input_tokens = 0;   // top-level (Anthropic)
 };
 
 void from_json(const nlohmann::json& j, Usage& u);
 
 // ---------------------------------------------------------------------------
-// ToolAccumulator — merges streaming tool_call deltas across SSE chunks
+// ChatResponse — typed result for a non-streaming chat completion
 // ---------------------------------------------------------------------------
+// Single-choice assumption: collapses to choices[0].
+
+struct ChatResponse {
+    std::string content;
+    std::string reasoning_content;
+    std::vector<ToolCall> tool_calls;
+    Usage usage;
+    std::string finish_reason; // "stop", "tool_calls", "length", etc.
+    std::string id;
+    std::string model;
+};
+
+void from_json(const nlohmann::json& j, ChatResponse& r);
 
 class ToolAccumulator {
   public:
@@ -152,5 +168,57 @@ nlohmann::json build_openai_payload(const std::vector<ProtocolMessage>& messages
 nlohmann::json make_function_tool(const std::string& name,
                                   const std::string& description,
                                   const nlohmann::json& parameters);
+
+// ---------------------------------------------------------------------------
+// ToolDef — strongly-typed tool definition (replaces raw make_function_tool)
+// ---------------------------------------------------------------------------
+
+struct ToolDef {
+    std::string name;
+    std::string description;
+    nlohmann::json parameters;     // JSON Schema — inherently flexible
+};
+
+void to_json(nlohmann::json& j, const ToolDef& td);
+
+// ---------------------------------------------------------------------------
+// ChatRequest — typed request payload for chat completions
+// ---------------------------------------------------------------------------
+
+struct ChatRequest {
+    std::string model;
+    std::vector<ProtocolMessage> messages;
+    std::vector<ToolDef> tools;
+    bool stream = false;
+
+    // ── Token limits ──
+    // Max tokens hint. The library decides which wire field to write:
+    //   max_completion_tokens (when thinking_enabled=true) or
+    //   max_tokens (thinking_enabled=false).
+    // If 0, falls back to context_limit/4 (capped at 32768).
+    int max_tokens = 0;
+
+    // Context window size from API metadata. Used only when max_tokens==0
+    // to derive the fallback limit. 0 = use hardcoded default (32768).
+    int context_limit = 0;
+
+    // ── Thinking / Reasoning ──
+    bool thinking_enabled = false;
+    // Optional override for the reasoning_effort field sent to the API.
+    // When unset, the library applies its built-in model detection
+    // (e.g. "high" for OpenAI o-series, nothing for non-OpenAI thinking models).
+    std::optional<std::string> reasoning_effort;
+
+    // ── System prompt ──
+    // Injected as the first system-role message in the messages array.
+    // If absent, no system message is prepended.
+    std::optional<std::string> system_prompt;
+
+    // ── Streaming options ──
+    bool include_usage = true;        // maps to stream_options.include_usage
+};
+
+/// Serialize a ChatRequest to an OpenAI-compatible JSON payload.
+nlohmann::json to_json(const ChatRequest& req);
 
 } // namespace llmclient

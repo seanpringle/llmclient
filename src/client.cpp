@@ -286,7 +286,8 @@ std::expected<std::vector<std::string>, std::string> llmclient::Client::fetch_mo
     return models;
 }
 
-std::expected<nlohmann::json, std::string> llmclient::Client::chat(const nlohmann::json& payload) {
+std::expected<llmclient::ChatResponse, std::string> llmclient::Client::chat(const ChatRequest& req) {
+    nlohmann::json payload = to_json(req);
     std::string payload_str = payload.dump();
     std::string body;
     long http_code = 0;
@@ -337,13 +338,21 @@ std::expected<nlohmann::json, std::string> llmclient::Client::chat(const nlohman
     }
 
     try {
-        return nlohmann::json::parse(body);
+        auto j = nlohmann::json::parse(body);
+        return j.get<ChatResponse>();
     } catch (const nlohmann::json::parse_error& e) {
         return std::unexpected("JSON parse error: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        return std::unexpected("ChatResponse parse error: " + std::string(e.what()));
     }
 }
 
-std::expected<void, std::string> llmclient::Client::stream_chat(const nlohmann::json& payload, SSEParser::Callbacks callbacks) {
+std::expected<void, std::string> llmclient::Client::stream_chat(const ChatRequest& req, SSEParser::Callbacks callbacks) {
+    nlohmann::json payload = to_json(req);
+    return stream_chat_impl(payload, std::move(callbacks));
+}
+
+std::expected<void, std::string> llmclient::Client::stream_chat_impl(const nlohmann::json& payload, SSEParser::Callbacks callbacks) {
     std::string payload_str = payload.dump();
     long http_code = 0;
 
@@ -480,57 +489,8 @@ std::expected<void, std::string> llmclient::Client::stream_chat(const nlohmann::
 
 // ── Payload building ──
 
-nlohmann::json llmclient::Client::build_chat_request(const std::string& model,
-                                                     const nlohmann::json& messages,
-                                                     const nlohmann::json& tools,
-                                                     bool stream,
-                                                     int max_tokens_hint,
-                                                     int context_limit,
-                                                     bool thinking_enabled) const {
-    // Validate: tools must be null (no tools) or a JSON array.
-    if (!tools.is_null() && !tools.is_array()) {
-        throw std::invalid_argument(
-            "tools must be a JSON array or null, got " + std::string(tools.type_name()));
-    }
-
-    nlohmann::json payload = {
-        {"model", model},
-        {"messages", messages},
-        {"stream", stream},
-        {"stream_options", {{"include_usage", true}}}
-    };
-
-    // Omit the tools key entirely when null or empty — the API spec allows
-    // omitting the field when there are no tools.
-    if (!tools.is_null() && !tools.empty()) {
-        payload["tools"] = tools;
-    }
-
-    int limit = max_tokens_hint > 0 ? max_tokens_hint
-        : (context_limit > 0 ? std::min(context_limit / 4, 32768) : 32768);
-    apply_thinking_params(payload, limit, model, thinking_enabled);
-    return payload;
-}
-
-void llmclient::Client::apply_thinking_params(nlohmann::json& payload, int limit,
-                                              const std::string& model,
-                                              bool thinking_enabled) const {
-    if (thinking_enabled) {
-        std::string lower = model;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-        bool is_openai = lower.find("o1") != std::string::npos
-                      || lower.find("o3") != std::string::npos
-                      || lower.find("o4") != std::string::npos
-                      || lower.find("gpt-5") != std::string::npos;
-        if (is_openai) {
-            payload["reasoning_effort"] = "high";
-        } else {
-            payload["thinking"] = {{"type", "enabled"}};
-        }
-        payload["max_completion_tokens"] = limit;
-    } else {
-        payload["max_tokens"] = limit;
-    }
+nlohmann::json llmclient::Client::build_chat_request(const ChatRequest& req) const {
+    return to_json(req);
 }
 
 bool llmclient::Client::model_supports_thinking(const std::string& model) {

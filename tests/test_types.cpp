@@ -295,6 +295,170 @@ TEST_CASE("Usage from_json with empty object", "[types][usage]") {
     CHECK(u.total_tokens == 0);
 }
 
+TEST_CASE("Usage from_json with reasoning_tokens from completion_tokens_details",
+          "[types][usage]") {
+    json j = json::parse(R"({
+        "prompt_tokens": 10,
+        "completion_tokens": 20,
+        "total_tokens": 30,
+        "completion_tokens_details": {
+            "reasoning_tokens": 42
+        }
+    })");
+    Usage u = j.get<Usage>();
+    CHECK(u.prompt_tokens == 10);
+    CHECK(u.completion_tokens == 20);
+    CHECK(u.total_tokens == 30);
+    CHECK(u.reasoning_tokens == 42);
+}
+
+TEST_CASE("Usage from_json with cache fields (Anthropic)", "[types][usage]") {
+    json j = json::parse(R"({
+        "prompt_tokens": 10,
+        "completion_tokens": 20,
+        "total_tokens": 30,
+        "cache_read_input_tokens": 100,
+        "cache_creation_input_tokens": 50
+    })");
+    Usage u = j.get<Usage>();
+    CHECK(u.cache_read_input_tokens == 100);
+    CHECK(u.cache_creation_input_tokens == 50);
+}
+
+TEST_CASE("Usage from_json missing optional fields default to 0", "[types][usage]") {
+    json j = json::parse(R"({"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3})");
+    Usage u = j.get<Usage>();
+    CHECK(u.prompt_tokens == 1);
+    CHECK(u.completion_tokens == 2);
+    CHECK(u.total_tokens == 3);
+    CHECK(u.reasoning_tokens == 0);
+    CHECK(u.cache_read_input_tokens == 0);
+    CHECK(u.cache_creation_input_tokens == 0);
+}
+
+// ========================================================================
+// ChatResponse tests
+// ========================================================================
+
+TEST_CASE("ChatResponse default values", "[types][chatresponse]") {
+    ChatResponse r;
+    CHECK(r.content.empty());
+    CHECK(r.reasoning_content.empty());
+    CHECK(r.tool_calls.empty());
+    CHECK(r.finish_reason.empty());
+    CHECK(r.id.empty());
+    CHECK(r.model.empty());
+    CHECK(r.usage.prompt_tokens == 0);
+}
+
+TEST_CASE("ChatResponse from_json basic content", "[types][chatresponse]") {
+    json j = json::parse(R"({
+        "id": "chatcmpl-123",
+        "model": "gpt-4",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "Hello world"
+            }
+        }],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+            "total_tokens": 30
+        }
+    })");
+    ChatResponse r = j.get<ChatResponse>();
+    CHECK(r.id == "chatcmpl-123");
+    CHECK(r.model == "gpt-4");
+    CHECK(r.content == "Hello world");
+    CHECK(r.finish_reason == "stop");
+    CHECK(r.usage.prompt_tokens == 10);
+    CHECK(r.usage.completion_tokens == 20);
+    CHECK(r.usage.total_tokens == 30);
+}
+
+TEST_CASE("ChatResponse from_json with reasoning_content", "[types][chatresponse]") {
+    json j = json::parse(R"({
+        "id": "chatcmpl-456",
+        "model": "o3-mini",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "Final answer",
+                "reasoning_content": "Step-by-step reasoning..."
+            }
+        }],
+        "usage": {}
+    })");
+    ChatResponse r = j.get<ChatResponse>();
+    CHECK(r.content == "Final answer");
+    CHECK(r.reasoning_content == "Step-by-step reasoning...");
+}
+
+TEST_CASE("ChatResponse from_json with tool_calls synthesizes index",
+          "[types][chatresponse]") {
+    json j = json::parse(R"({
+        "id": "call-789",
+        "model": "gpt-4",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"city\":\"London\"}"}
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "get_time",   "arguments": "{\"tz\":\"UTC\"}"}
+                    },
+                    {
+                        "id": "call_3",
+                        "type": "function",
+                        "function": {"name": "get_date",   "arguments": "{}"}
+                    }
+                ]
+            }
+        }],
+        "usage": {}
+    })");
+    ChatResponse r = j.get<ChatResponse>();
+    CHECK(r.finish_reason == "tool_calls");
+    REQUIRE(r.tool_calls.size() == 3);
+    // Index should be synthesized from array position
+    CHECK(r.tool_calls[0].index == 0);
+    CHECK(r.tool_calls[0].id == "call_1");
+    CHECK(r.tool_calls[0].name == "get_weather");
+    CHECK(r.tool_calls[0].arguments == R"({"city":"London"})");
+
+    CHECK(r.tool_calls[1].index == 1);
+    CHECK(r.tool_calls[1].id == "call_2");
+    CHECK(r.tool_calls[1].name == "get_time");
+    CHECK(r.tool_calls[1].arguments == R"({"tz":"UTC"})");
+
+    CHECK(r.tool_calls[2].index == 2);
+    CHECK(r.tool_calls[2].id == "call_3");
+    CHECK(r.tool_calls[2].name == "get_date");
+}
+
+TEST_CASE("ChatResponse from_json empty choices leaves defaults", "[types][chatresponse]") {
+    json j = json::parse(R"({"id":"x","model":"m","choices":[]})");
+    ChatResponse r = j.get<ChatResponse>();
+    CHECK(r.id == "x");
+    CHECK(r.model == "m");
+    CHECK(r.content.empty());
+    CHECK(r.tool_calls.empty());
+}
+
 // ========================================================================
 // ToolCall tests
 // ========================================================================

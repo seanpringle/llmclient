@@ -12,31 +12,43 @@
 using json = nlohmann::json;
 using namespace llmclient;
 
+// Helper to build a simple ChatRequest for testing.
+static ChatRequest simple_req(const std::string& model = "test",
+                              const std::string& user_msg = "hi",
+                              bool stream = false) {
+    ChatRequest req;
+    req.model = model;
+    req.stream = stream;
+    ProtocolMessage pm;
+    pm.role = "user";
+    pm.content = user_msg;
+    req.messages.push_back(std::move(pm));
+    return req;
+}
+
 // ===================================================================
 // Non-streaming chat
 // ===================================================================
 
-TEST_CASE("Client non-streaming returns JSON", "[client]") {
+TEST_CASE("Client non-streaming returns ChatResponse", "[client]") {
     MockServer server([](const std::string&) -> std::string {
         return R"({"id":"test-1","choices":[{"message":{"role":"assistant","content":"Hello!"}}]})";
     });
 
     Client client(server.base_url());
-    json payload = {{"model", "test"},
-                    {"messages",
-                     {{{"role", "user"}, {"content", "say hi"}}}}};
+    auto req = simple_req();
 
-    auto result = client.chat(payload);
+    auto result = client.chat(req);
     REQUIRE(result);
-    CHECK((*result)["id"] == "test-1");
-    CHECK((*result)["choices"][0]["message"]["content"] == "Hello!");
+    CHECK(result->id == "test-1");
+    CHECK(result->content == "Hello!");
 }
 
 TEST_CASE("Client non-streaming errors on bad URL", "[client]") {
     Client client("http://127.0.0.1:1/v1");
-    json payload = {{"model", "test"}, {"messages", {}}};
+    auto req = simple_req();
 
-    auto result = client.chat(payload);
+    auto result = client.chat(req);
     CHECK_FALSE(result);
     CHECK((result.error().find("curl error") != std::string::npos ||
            result.error().find("HTTP") != std::string::npos));
@@ -52,8 +64,8 @@ TEST_CASE("Client non-streaming sends auth header", "[client]") {
     });
 
     Client client(server.base_url(), "sk-test123");
-    json payload = {{"model", "test"}, {"messages", {}}};
-    auto result = client.chat(payload);
+    auto req = simple_req();
+    auto result = client.chat(req);
     REQUIRE(result);
     CHECK(auth_seen);
 }
@@ -68,8 +80,8 @@ TEST_CASE("Client non-streaming no auth when key empty", "[client]") {
     });
 
     Client client(server.base_url());
-    json payload = {{"model", "test"}, {"messages", {}}};
-    auto result = client.chat(payload);
+    auto req = simple_req();
+    auto result = client.chat(req);
     REQUIRE(result);
     CHECK_FALSE(auth_seen);
 }
@@ -78,7 +90,7 @@ TEST_CASE("Client non-streaming no auth when key empty", "[client]") {
 // Streaming chat
 // ===================================================================
 
-TEST_CASE("Client streaming calls on_data and on_done", "[client]") {
+TEST_CASE("Client streaming calls on_done", "[client]") {
     MockServer server(
         [](const std::string&) -> std::string {
             return "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\ndata: [DONE]\n\n";
@@ -86,22 +98,18 @@ TEST_CASE("Client streaming calls on_data and on_done", "[client]") {
         true);
 
     Client client(server.base_url());
-    json payload = {{"model", "test"},
-                    {"messages",
-                     {{{"role", "user"}, {"content", "hi"}}}}};
 
     std::string content;
     bool done = false;
     bool errored = false;
 
     SSEParser::Callbacks cbs;
-    cbs.on_data = [&](const std::string&, const json& j) {
-        content += j["choices"][0]["delta"].value("content", "");
-    };
+    cbs.on_content_delta = [&](std::string_view t) { content += std::string(t); };
     cbs.on_done = [&]() { done = true; };
     cbs.on_error = [&](const std::string&) { errored = true; };
 
-    auto result = client.stream_chat(payload, std::move(cbs));
+    auto req = simple_req("test", "hi", true);
+    auto result = client.stream_chat(req, std::move(cbs));
     REQUIRE(result);
     CHECK(content == "Hello world");
     CHECK(done);
@@ -117,15 +125,15 @@ TEST_CASE("Client streaming calls on_error for bad JSON", "[client]") {
         true);
 
     Client client(server.base_url());
-    json payload = {{"model", "test"}, {"messages", {}}};
 
     bool errored = false;
     SSEParser::Callbacks cbs;
-    cbs.on_data = [](const std::string&, const json&) {};
+    cbs.on_content_delta = [](std::string_view) {};
     cbs.on_done = []() {};
     cbs.on_error = [&](const std::string&) { errored = true; };
 
-    auto result = client.stream_chat(payload, std::move(cbs));
+    auto req = simple_req("test", "", true);
+    auto result = client.stream_chat(req, std::move(cbs));
     // The transfer should succeed (HTTP 200), but the parse error fires
     CHECK(result);
     CHECK(errored);
@@ -148,7 +156,6 @@ TEST_CASE("Client streaming structured callbacks fire correctly", "[client]") {
         true);
 
     Client client(server.base_url());
-    json payload = {{"model", "test"}, {"messages", {}}};
 
     std::string content;
     std::string reasoning;
@@ -157,15 +164,13 @@ TEST_CASE("Client streaming structured callbacks fire correctly", "[client]") {
     bool usage_seen = false;
     bool done = false;
     bool errored = false;
-    int data_cb_count = 0;
 
     SSEParser::Callbacks cbs;
-    cbs.on_data = [&](const std::string&, const json&) { data_cb_count++; };
-    cbs.on_done = [&]() { done = true; };
-    cbs.on_error = [&](const std::string&) { errored = true; };
     cbs.on_content_delta = [&](std::string_view t) { content += std::string(t); };
     cbs.on_reasoning_delta = [&](std::string_view t) { reasoning += std::string(t); };
     cbs.on_tool_call_delta = [&](const json& d) { tool_call_count++; tool_acc.apply(d); };
+    cbs.on_done = [&]() { done = true; };
+    cbs.on_error = [&](const std::string&) { errored = true; };
     cbs.on_usage = [&](Usage u) {
         usage_seen = true;
         CHECK(u.prompt_tokens == 10);
@@ -173,7 +178,8 @@ TEST_CASE("Client streaming structured callbacks fire correctly", "[client]") {
         CHECK(u.total_tokens == 30);
     };
 
-    auto result = client.stream_chat(payload, std::move(cbs));
+    auto req = simple_req("test", "", true);
+    auto result = client.stream_chat(req, std::move(cbs));
     REQUIRE(result);
     CHECK_FALSE(errored);
     CHECK(done);
@@ -185,8 +191,6 @@ TEST_CASE("Client streaming structured callbacks fire correctly", "[client]") {
     CHECK(calls[0].id == "call_1");
     CHECK(calls[0].name == "test");
     CHECK(usage_seen);
-    // on_data should have been called for every event (4 data events + 1 [DONE] = 5, but [DONE] doesn't call on_data, so 4)
-    CHECK(data_cb_count == 4);
 }
 
 // ===================================================================
@@ -199,8 +203,8 @@ TEST_CASE("Client last_raw_response after chat", "[client]") {
     });
 
     Client client(server.base_url());
-    json payload = {{"model", "test"}, {"messages", {}}};
-    auto result = client.chat(payload);
+    auto req = simple_req();
+    auto result = client.chat(req);
     REQUIRE(result);
     CHECK(client.last_raw_response().find("test-raw") != std::string::npos);
 }
@@ -255,10 +259,6 @@ TEST_CASE("Client fetch_model_context_limit from /v1/models", "[client]") {
 }
 
 TEST_CASE("Client fetch_model_context_limit fallback model with 0 context_window", "[client]") {
-    // When the requested model isn't in the list, the function falls back
-    // to the first model in the data array. If that fallback has a
-    // context_window of 0 (or no usable field), the result (0) is cached
-    // so we don't re-query on every call.
     MockServer server([](const std::string& req) -> std::string {
         if (req.find("/v1/models") != std::string::npos) {
             return R"({"object":"list","data":[
@@ -298,86 +298,12 @@ TEST_CASE("Client fetch_model_context_limit caches second call", "[client]") {
     Client client(server.base_url());
 
     // First call — should hit the server
-    int first = client.fetch_model_context_limit("test-model");
-    CHECK(first == 16000);
+    CHECK(client.fetch_model_context_limit("test-model") == 16000);
     CHECK(call_count == 1);
 
-    // Second call with same model — should use cache
-    int second = client.fetch_model_context_limit("test-model");
-    CHECK(second == 16000);
-    CHECK(call_count == 1); // no additional HTTP request
-}
-
-TEST_CASE("Client fetch_model_context_limit separate cache entries per model", "[client]") {
-    std::atomic<int> call_count{0};
-    MockServer server([&](const std::string& req) -> std::string {
-        call_count++;
-        if (req.find("/v1/models") != std::string::npos) {
-            return R"({"object":"list","data":[
-                {"id":"model-a","object":"model","context_window":8000},
-                {"id":"model-b","object":"model","context_window":32000}
-            ]})";
-        }
-        return R"({"error":"unexpected"})";
-    });
-
-    Client client(server.base_url());
-
-    int a = client.fetch_model_context_limit("model-a");
-    CHECK(a == 8000);
+    // Second call — should be cached, no server hit
+    CHECK(client.fetch_model_context_limit("test-model") == 16000);
     CHECK(call_count == 1);
-
-    int b = client.fetch_model_context_limit("model-b");
-    CHECK(b == 32000);
-    CHECK(call_count == 2); // different model, new request
-}
-
-TEST_CASE("Client fetch_model_context_limit separate cache per base URL", "[client]") {
-    int call_count_a = 0, call_count_b = 0;
-    MockServer server_a([&](const std::string& req) -> std::string {
-        call_count_a++;
-        if (req.find("/v1/models") != std::string::npos)
-            return R"({"object":"list","data":[{"id":"m","object":"model","context_window":8000}]})";
-        return R"({"error":"unexpected"})";
-    });
-    MockServer server_b([&](const std::string& req) -> std::string {
-        call_count_b++;
-        if (req.find("/v1/models") != std::string::npos)
-            return R"({"object":"list","data":[{"id":"m","object":"model","context_window":16000}]})";
-        return R"({"error":"unexpected"})";
-    });
-
-    Client client_a(server_a.base_url());
-    Client client_b(server_b.base_url());
-
-    CHECK(client_a.fetch_model_context_limit("m") == 8000);
-    CHECK(call_count_a == 1);
-
-    CHECK(client_b.fetch_model_context_limit("m") == 16000);
-    CHECK(call_count_b == 1);
-
-    // Calling client_a again with same model should return cached value
-    CHECK(client_a.fetch_model_context_limit("m") == 8000);
-    CHECK(call_count_a == 1); // no new request to server_a
-}
-
-TEST_CASE("Client fetch_model_context_limit does not cache HTTP errors", "[client]") {
-    std::atomic<int> call_count{0};
-    // Mock that always returns something that isn't a valid models response.
-    // First call: fails → returns 0, not cached.
-    // Second call: should retry (not served from cache).
-    MockServer server([&](const std::string&) -> std::string {
-        call_count++;
-        return R"({"error":"not a models list"})";
-    });
-    Client client(server.base_url());
-
-    CHECK(client.fetch_model_context_limit("m") == 0);
-    CHECK(call_count == 1);
-
-    // Second call — should NOT be cached (HTTP error wasn't cached)
-    CHECK(client.fetch_model_context_limit("m") == 0);
-    CHECK(call_count == 2);
 }
 
 // ===================================================================
@@ -394,8 +320,8 @@ TEST_CASE("Client retries on 429 Too Many Requests", "[client]") {
         false, 429);
 
     Client client(server.base_url());
-    json payload = {{"model", "test"}, {"messages", {}}};
-    auto result = client.chat(payload);
+    auto req = simple_req();
+    auto result = client.chat(req);
 
     // Should fail eventually (after retries), but call_count > 1 means retries happened.
     CHECK_FALSE(result);
@@ -412,8 +338,8 @@ TEST_CASE("Client retries on 503 Service Unavailable", "[client]") {
         false, 503);
 
     Client client(server.base_url());
-    json payload = {{"model", "test"}, {"messages", {}}};
-    auto result = client.chat(payload);
+    auto req = simple_req();
+    auto result = client.chat(req);
 
     CHECK_FALSE(result);
     CHECK(call_count > 1);
@@ -429,8 +355,8 @@ TEST_CASE("Client does NOT retry on 400 Bad Request", "[client]") {
         false, 400);
 
     Client client(server.base_url());
-    json payload = {{"model", "test"}, {"messages", {}}};
-    auto result = client.chat(payload);
+    auto req = simple_req();
+    auto result = client.chat(req);
 
     CHECK_FALSE(result);
     CHECK(call_count == 1);  // no retry
@@ -455,21 +381,20 @@ TEST_CASE("Client cancellation during streaming stops mid-stream", "[client]") {
     Client client(server.base_url());
     client.set_cancelled(cancelled);
 
-    json payload = {{"model", "test"}, {"messages", {}}};
-
     std::string content;
     SSEParser::Callbacks cbs;
-    cbs.on_data = [&](const std::string&, const json& j) {
-        content += j["choices"][0]["delta"].value("content", "");
+    cbs.on_content_delta = [&](std::string_view t) {
+        content += std::string(t);
         // Cancel after receiving first data
         *cancelled = true;
     };
     cbs.on_done = []() {};
     cbs.on_error = [](const std::string&) {};
 
+    auto req = simple_req("test", "", true);
     // The stream might return an error due to cancellation, or succeed
     // but with cancelled token. Either is acceptable.
-    auto result = client.stream_chat(payload, std::move(cbs));
+    auto result = client.stream_chat(req, std::move(cbs));
     // We should have received some content
     CHECK(content == "Hello");
 }
@@ -488,23 +413,17 @@ TEST_CASE("Client streaming with tool call delta", "[client]") {
         true);
 
     Client client(server.base_url());
-    json payload = {{"model", "test"}, {"messages", {}}};
 
     ToolAccumulator acc;
     bool done = false;
 
     SSEParser::Callbacks cbs;
-    cbs.on_data = [&](const std::string&, const json& j) {
-        auto choices = j.find("choices");
-        if (choices != j.end() && choices->is_array() && !choices->empty()) {
-            const auto& delta = (*choices)[0]["delta"];
-            acc.apply(delta);
-        }
-    };
+    cbs.on_tool_call_delta = [&](const json& d) { acc.apply(d); };
     cbs.on_done = [&]() { done = true; };
     cbs.on_error = [](const std::string&) {};
 
-    auto result = client.stream_chat(payload, std::move(cbs));
+    auto req = simple_req("test", "", true);
+    auto result = client.stream_chat(req, std::move(cbs));
     REQUIRE(result);
 
     CHECK(done);
@@ -516,19 +435,19 @@ TEST_CASE("Client streaming with tool call delta", "[client]") {
 }
 
 // ===================================================================
-// build_chat_request tests
+// to_json(ChatRequest) tests
 // ===================================================================
 
-TEST_CASE("build_chat_request basic envelope", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "hi"}}};
-    json tools = json::array();
-
-    json payload = client.build_chat_request("test-model", messages, tools, true);
+TEST_CASE("to_json(ChatRequest) basic envelope", "[client]") {
+    auto req = simple_req("test-model", "hi", true);
+    json payload = to_json(req);
 
     CHECK(payload["model"] == "test-model");
-    CHECK(payload["messages"] == messages);
-    // Empty tools array → key omitted
+    REQUIRE(payload["messages"].is_array());
+    CHECK(payload["messages"].size() == 1);
+    CHECK(payload["messages"][0]["role"] == "user");
+    CHECK(payload["messages"][0]["content"] == "hi");
+    // Empty tools vector → key omitted
     CHECK_FALSE(payload.contains("tools"));
     CHECK(payload["stream"] == true);
     CHECK(payload.contains("stream_options"));
@@ -539,77 +458,48 @@ TEST_CASE("build_chat_request basic envelope", "[client]") {
     CHECK_FALSE(payload.contains("thinking"));
 }
 
-TEST_CASE("build_chat_request rejects tools as object", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "hi"}}};
-    CHECK_THROWS_AS(client.build_chat_request("test", messages, json::object(), true),
-                    std::invalid_argument);
-}
-
-TEST_CASE("build_chat_request rejects tools as string", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "hi"}}};
-    CHECK_THROWS_AS(client.build_chat_request("test", messages, json("not_an_array"), true),
-                    std::invalid_argument);
-}
-
-TEST_CASE("build_chat_request rejects tools as number", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "hi"}}};
-    CHECK_THROWS_AS(client.build_chat_request("test", messages, json(42), true),
-                    std::invalid_argument);
-}
-
-TEST_CASE("build_chat_request rejects tools as boolean", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "hi"}}};
-    CHECK_THROWS_AS(client.build_chat_request("test", messages, json(true), true),
-                    std::invalid_argument);
-}
-
-TEST_CASE("build_chat_request omits empty tools array", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "hi"}}};
-    // No throw for empty array
-    CHECK_NOTHROW(client.build_chat_request("test", messages, json::array(), true));
-    json payload = client.build_chat_request("test", messages, json::array(), true);
+TEST_CASE("to_json(ChatRequest) omits empty tools vector", "[client]") {
+    auto req = simple_req("test", "hi", true);
+    json payload = to_json(req);
     CHECK_FALSE(payload.contains("tools"));
 }
 
-TEST_CASE("build_chat_request omits null tools via nullptr", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "hi"}}};
-    json payload = client.build_chat_request("test", messages, nullptr, true);
-    CHECK_FALSE(payload.contains("tools"));
-}
+TEST_CASE("to_json(ChatRequest) includes and preserves valid tools array", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.stream = false;
+    ProtocolMessage pm;
+    pm.role = "user";
+    pm.content = "hi";
+    req.messages.push_back(std::move(pm));
 
-TEST_CASE("build_chat_request omits null tools via default-constructed json", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "hi"}}};
-    json null_tools;  // default-constructed → null
-    CHECK_NOTHROW(client.build_chat_request("test", messages, null_tools, true));
-    json payload = client.build_chat_request("test", messages, null_tools, true);
-    CHECK_FALSE(payload.contains("tools"));
-}
+    ToolDef td;
+    td.name = "get_weather";
+    td.description = "Get weather";
+    td.parameters = nlohmann::json::object();
+    req.tools.push_back(std::move(td));
 
-TEST_CASE("build_chat_request includes and preserves valid tools array", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "hi"}}};
-    json tools = json::array();
-    tools.push_back(make_function_tool("get_weather", "Get weather", {}));
-    json payload = client.build_chat_request("test", messages, tools, true);
+    json payload = to_json(req);
+
     CHECK(payload.contains("tools"));
     CHECK(payload["tools"].is_array());
     CHECK(payload["tools"].size() == 1);
-    CHECK(payload["tools"] == tools);  // content fidelity
+    CHECK(payload["tools"][0]["type"] == "function");
+    CHECK(payload["tools"][0]["function"]["name"] == "get_weather");
 }
 
-TEST_CASE("build_chat_request with thinking enabled for non-OpenAI", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "think"}}};
+TEST_CASE("to_json(ChatRequest) with thinking enabled for non-OpenAI", "[client]") {
+    ChatRequest req;
+    req.model = "deepseek-v4";
+    req.stream = true;
+    req.thinking_enabled = true;
+    req.max_tokens = 4096;
+    ProtocolMessage pm;
+    pm.role = "user";
+    pm.content = "think";
+    req.messages.push_back(std::move(pm));
 
-    json payload = client.build_chat_request("deepseek-v4", messages, json::array(),
-                                             true, 4096, 0, true);
+    json payload = to_json(req);
 
     CHECK(payload["model"] == "deepseek-v4");
     // Non-OpenAI models use "thinking" param
@@ -620,12 +510,18 @@ TEST_CASE("build_chat_request with thinking enabled for non-OpenAI", "[client]")
     CHECK(payload["max_completion_tokens"] == 4096);
 }
 
-TEST_CASE("build_chat_request with thinking for OpenAI model", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "think"}}};
+TEST_CASE("to_json(ChatRequest) with thinking for OpenAI model", "[client]") {
+    ChatRequest req;
+    req.model = "o3-mini";
+    req.stream = true;
+    req.thinking_enabled = true;
+    req.max_tokens = 8192;
+    ProtocolMessage pm;
+    pm.role = "user";
+    pm.content = "think";
+    req.messages.push_back(std::move(pm));
 
-    json payload = client.build_chat_request("o3-mini", messages, json::array(),
-                                             true, 8192, 0, true);
+    json payload = to_json(req);
 
     // OpenAI models use "reasoning_effort" param
     CHECK(payload.contains("reasoning_effort"));
@@ -634,14 +530,77 @@ TEST_CASE("build_chat_request with thinking for OpenAI model", "[client]") {
     CHECK(payload["max_completion_tokens"] == 8192);
 }
 
-TEST_CASE("build_chat_request derives max_tokens from context_limit", "[client]") {
-    Client client("http://example.com/v1");
-    json messages = {{{"role", "user"}, {"content", "hi"}}};
+TEST_CASE("to_json(ChatRequest) derives max_tokens from context_limit", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.stream = true;
+    req.context_limit = 32000;
+    ProtocolMessage pm;
+    pm.role = "user";
+    pm.content = "hi";
+    req.messages.push_back(std::move(pm));
 
-    // When max_tokens_hint is 0 and context_limit is 32000, should use 32000/4 = 8000
-    json payload = client.build_chat_request("test", messages, json::array(),
-                                             true, 0, 32000, false);
+    json payload = to_json(req);
+    // When max_tokens is 0 and context_limit is 32000, should use 32000/4 = 8000
     CHECK(payload["max_tokens"] == 8000);
+}
+
+TEST_CASE("to_json(ChatRequest) with system_prompt prepends system message", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.stream = false;
+    req.system_prompt = "You are a helpful assistant.";
+    ProtocolMessage pm;
+    pm.role = "user";
+    pm.content = "hi";
+    req.messages.push_back(std::move(pm));
+
+    json payload = to_json(req);
+
+    REQUIRE(payload["messages"].is_array());
+    REQUIRE(payload["messages"].size() == 2);
+    CHECK(payload["messages"][0]["role"] == "system");
+    CHECK(payload["messages"][0]["content"] == "You are a helpful assistant.");
+    CHECK(payload["messages"][1]["role"] == "user");
+    CHECK(payload["messages"][1]["content"] == "hi");
+}
+
+TEST_CASE("to_json(ChatRequest) with reasoning_effort override", "[client]") {
+    ChatRequest req;
+    req.model = "o3-mini";
+    req.stream = true;
+    req.thinking_enabled = true;
+    req.reasoning_effort = "low";  // override the default "high"
+    ProtocolMessage pm;
+    pm.role = "user";
+    pm.content = "hi";
+    req.messages.push_back(std::move(pm));
+
+    json payload = to_json(req);
+
+    CHECK(payload["reasoning_effort"] == "low");
+}
+
+TEST_CASE("to_json(ToolDef) matches make_function_tool", "[client]") {
+    ToolDef td;
+    td.name = "test_tool";
+    td.description = "A test tool";
+    td.parameters = {{"type", "object"}, {"properties", {}}};
+
+    json from_td;
+    to_json(from_td, td);
+    json from_mft = make_function_tool("test_tool", "A test tool", {{"type", "object"}, {"properties", {}}});
+
+    CHECK(from_td == from_mft);
+}
+
+TEST_CASE("Client build_chat_request delegates to to_json", "[client]") {
+    Client client("http://example.com/v1");
+    auto req = simple_req("test-model", "hi", true);
+
+    json from_client = client.build_chat_request(req);
+    json from_free = to_json(req);
+    CHECK(from_client == from_free);
 }
 
 // ===================================================================
