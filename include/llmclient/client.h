@@ -54,6 +54,9 @@ class Client {
     /// Returns true if the model name matches known reasoning/thinking model patterns.
     static bool model_supports_thinking(const std::string& model);
 
+    /// Returns true if the model name matches known multimodal model patterns.
+    static bool model_supports_images(const std::string& model);
+
     const std::string& last_raw_response() const { return raw_response_; }
     std::string url() const {
         return api_base_ + "/chat/completions";

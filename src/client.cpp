@@ -503,3 +503,20 @@ bool llmclient::Client::model_supports_thinking(const std::string& model) {
     }
     return false;
 }
+
+bool llmclient::Client::model_supports_images(const std::string& model) {
+    // Heuristic: known vision-capable model families.
+    static const char* keywords[] = {
+        "qwen3",
+        "gemma",
+        "glm-5",
+        "gemini",
+    };
+    std::string lower = model;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    for (const auto* kw : keywords) {
+        if (lower.find(kw) != std::string::npos)
+            return true;
+    }
+    return false;
+}

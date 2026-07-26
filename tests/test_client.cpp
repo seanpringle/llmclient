@@ -747,3 +747,22 @@ TEST_CASE("model_supports_thinking unknown models", "[client]") {
     CHECK_FALSE(Client::model_supports_thinking("gemini-pro"));
     CHECK_FALSE(Client::model_supports_thinking(""));
 }
+
+// ===================================================================
+// model_supports_images tests
+// ===================================================================
+
+TEST_CASE("model_supports_images known models", "[client]") {
+    CHECK(Client::model_supports_images("qwen3-7b"));
+    CHECK(Client::model_supports_images("gemma-3-12b"));
+    CHECK(Client::model_supports_images("glm-5"));
+    CHECK(Client::model_supports_images("gemini-2.0-flash"));
+}
+
+TEST_CASE("model_supports_images unknown models", "[client]") {
+    CHECK_FALSE(Client::model_supports_images("gpt-4"));
+    CHECK_FALSE(Client::model_supports_images("llama-3"));
+    CHECK_FALSE(Client::model_supports_images("claude-2"));
+    CHECK_FALSE(Client::model_supports_images("deepseek-v4"));
+    CHECK_FALSE(Client::model_supports_images(""));
+}
