@@ -407,68 +407,77 @@ void SSEParser::process_line(std::string line) {
                     const auto& delta = choice["delta"];
 
                     // Build StreamDelta
+                    StreamDelta sd;
+
+                    auto extract_str = [&](const std::string& key) -> std::optional<std::string> {
+                        auto it = delta.find(key);
+                        if (it != delta.end() && it->is_string()) {
+                            return it->get<std::string>();
+                        }
+                        return std::nullopt;
+                    };
+
+                    sd.content = extract_str("content");
+
+                    // Reasoning — check both `reasoning_content` and `reasoning`
+                    auto r = extract_str("reasoning_content");
+                    if (!r.has_value()) {
+                        r = extract_str("reasoning");
+                    }
+                    sd.reasoning_content = std::move(r);
+
+                    // Refusal (safety filter) — may appear in delta
+                    sd.refusal = extract_str("refusal");
+
+                    // Finish reason (sibling of delta, not inside delta)
+                    auto fr_it = choice.find("finish_reason");
+                    if (fr_it != choice.end() && !fr_it->is_null()) {
+                        sd.finish_reason = fr_it->get<std::string>();
+                    }
+
+                    // Tool calls
+                    auto tc_it = delta.find("tool_calls");
+                    if (tc_it != delta.end() && tc_it->is_array()) {
+                        std::vector<ToolCallDelta> tcs;
+                        for (const auto& tc_json : *tc_it) {
+                            ToolCallDelta tcd;
+                            tcd.index = tc_json.value("index", 0);
+
+                            auto id_it = tc_json.find("id");
+                            if (id_it != tc_json.end() && id_it->is_string())
+                                tcd.id = id_it->get<std::string>();
+
+                            auto func_it = tc_json.find("function");
+                            if (func_it != tc_json.end() && func_it->is_object()) {
+                                auto name_it = func_it->find("name");
+                                if (name_it != func_it->end() && name_it->is_string())
+                                    tcd.name = name_it->get<std::string>();
+
+                                auto args_it = func_it->find("arguments");
+                                if (args_it != func_it->end() && args_it->is_string())
+                                    tcd.arguments_fragment = args_it->get<std::string>();
+                            }
+
+                            tcs.push_back(std::move(tcd));
+                        }
+                        sd.tool_calls = std::move(tcs);
+                    }
+
                     if (cb_.on_delta) {
-                        StreamDelta sd;
-
-                        auto extract_str = [&](const std::string& key) -> std::optional<std::string> {
-                            auto it = delta.find(key);
-                            if (it != delta.end() && it->is_string()) {
-                                return it->get<std::string>();
-                            }
-                            return std::nullopt;
-                        };
-
-                        sd.content = extract_str("content");
-
-                        // Reasoning — check both `reasoning_content` and `reasoning`
-                        auto r = extract_str("reasoning_content");
-                        if (!r.has_value()) {
-                            r = extract_str("reasoning");
-                        }
-                        sd.reasoning_content = std::move(r);
-
-                        // Finish reason (sibling of delta, not inside it)
-                        auto fr_it = choice.find("finish_reason");
-                        if (fr_it != choice.end() && !fr_it->is_null()) {
-                            sd.finish_reason = fr_it->get<std::string>();
-                            // Also fire the legacy on_finish callback
-                            if (cb_.on_finish) {
-                                cb_.on_finish(*sd.finish_reason);
-                            }
-                        }
-
-                        // Refusal (safety filter) — may appear in delta
-                        sd.refusal = extract_str("refusal");
-
-                        // Tool calls
-                        auto tc_it = delta.find("tool_calls");
-                        if (tc_it != delta.end() && tc_it->is_array()) {
-                            std::vector<ToolCallDelta> tcs;
-                            for (const auto& tc_json : *tc_it) {
-                                ToolCallDelta tcd;
-                                tcd.index = tc_json.value("index", 0);
-
-                                auto id_it = tc_json.find("id");
-                                if (id_it != tc_json.end() && id_it->is_string())
-                                    tcd.id = id_it->get<std::string>();
-
-                                auto func_it = tc_json.find("function");
-                                if (func_it != tc_json.end() && func_it->is_object()) {
-                                    auto name_it = func_it->find("name");
-                                    if (name_it != func_it->end() && name_it->is_string())
-                                        tcd.name = name_it->get<std::string>();
-
-                                    auto args_it = func_it->find("arguments");
-                                    if (args_it != func_it->end() && args_it->is_string())
-                                        tcd.arguments_fragment = args_it->get<std::string>();
-                                }
-
-                                tcs.push_back(std::move(tcd));
-                            }
-                            sd.tool_calls = std::move(tcs);
-                        }
-
                         cb_.on_delta(sd);
+                    }
+                }
+
+                // Finish reason (sibling of delta, not inside it) — also fire
+                // the legacy on_finish callback independently of on_delta.
+                if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
+                    const auto& choice = j["choices"][0];
+                    auto fr_it = choice.find("finish_reason");
+                    if (fr_it != choice.end() && !fr_it->is_null()) {
+                        std::string reason = fr_it->get<std::string>();
+                        if (cb_.on_finish) {
+                            cb_.on_finish(reason);
+                        }
                     }
                 }
 

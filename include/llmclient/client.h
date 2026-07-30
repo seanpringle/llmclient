@@ -44,8 +44,8 @@ class Client {
     // Query /v1/models and return the list of model IDs (empty on error).
     std::expected<std::vector<std::string>, std::string> fetch_models();
 
-    // Configure retry behaviour
-    void set_max_retries(int n) { max_retries_ = n; }
+    // Configure retry behaviour (clamped to at least 1).
+    void set_max_retries(int n) { max_retries_ = std::max(1, n); }
 
     /// Returns true if the model name matches known reasoning/thinking model patterns.
     static bool model_supports_thinking(const std::string& model);

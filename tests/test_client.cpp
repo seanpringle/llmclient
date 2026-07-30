@@ -400,7 +400,7 @@ TEST_CASE("Client fetch_model_context_limit caches second call", "[client]") {
 }
 
 // ===================================================================
-// Retry behavior
+// Retry behaviour tests
 // ===================================================================
 
 TEST_CASE("Client retries on 429 Too Many Requests", "[client]") {
@@ -453,6 +453,70 @@ TEST_CASE("Client does NOT retry on 400 Bad Request", "[client]") {
 
     CHECK_FALSE(result);
     CHECK(call_count == 1);  // no retry
+}
+
+TEST_CASE("Client should_retry includes 408 and 409", "[client]") {
+    Client client("http://example.com/v1");
+
+    // should_retry is private, but we test the behaviour by hitting the mock
+    // server with specific status codes.
+    // 408 should retry (call_count > 1)
+    std::atomic<int> call_count_408{0};
+    MockServer server408(
+        [&](const std::string&) -> std::string {
+            call_count_408++;
+            return "timeout";
+        },
+        false, 408);
+    Client client408(server408.base_url());
+    auto req408 = simple_req();
+    auto result408 = client408.chat(req408);
+    CHECK_FALSE(result408);
+    CHECK(call_count_408 > 1);
+
+    // 409 should retry (call_count > 1)
+    std::atomic<int> call_count_409{0};
+    MockServer server409(
+        [&](const std::string&) -> std::string {
+            call_count_409++;
+            return "conflict";
+        },
+        false, 409);
+    Client client409(server409.base_url());
+    auto req409 = simple_req();
+    auto result409 = client409.chat(req409);
+    CHECK_FALSE(result409);
+    CHECK(call_count_409 > 1);
+}
+
+TEST_CASE("Client set_max_retries clamps to minimum of 1", "[client]") {
+    // Use a bad port that will cause a connection error
+    Client client("http://127.0.0.1:1/v1");
+    client.set_max_retries(0);
+    // set_max_retries(0) is clamped to 1, so we should get exactly one attempt.
+    auto req = simple_req();
+    auto result = client.chat(req);
+    CHECK_FALSE(result);
+    // Should get a curl error (connection refused), not a misleading success
+    CHECK(result.error().find("curl error") != std::string::npos);
+}
+
+TEST_CASE("Client stream_chat requires on_delta callback", "[client]") {
+    MockServer server([](const std::string&) -> std::string {
+        return "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: [DONE]\n\n";
+    }, true);
+
+    Client client(server.base_url());
+    auto req = simple_req("test", "hi", true);
+
+    // Call with no on_delta — should fail-fast.
+    SSEParser::Callbacks cbs;
+    cbs.on_done = []() {};
+    cbs.on_error = [](const std::string&) {};
+
+    auto result = client.stream_chat(req, std::move(cbs));
+    CHECK_FALSE(result);
+    CHECK(result.error().find("on_delta") != std::string::npos);
 }
 
 // ===================================================================

@@ -130,20 +130,21 @@ CURLcode llmclient::Client::perform_with_retry(CURL* curl, long& http_code, std:
         if (attempt == max_retries_ - 1)
             return res;
 
-        // Check x-should-retry header — if present and false, don't retry.
+        // Check x-should-retry header — if false, give up; if true, force retry
+        // even if the status code wouldn't normally be retryable.
         auto should_retry_header = check_x_should_retry(curl);
         if (should_retry_header.has_value() && !*should_retry_header)
             return res;
 
         // Recoverable: HTTP-level errors on successful connections (e.g. 5xx, 429, 408, 409)
         // plus transient transport failures that may succeed on retry.
-        bool recoverable = (res == CURLE_OK && should_retry(http_code)) || res == CURLE_SEND_ERROR || res == CURLE_RECV_ERROR ||
+        // x-should-retry: true also forces retryability.
+        bool recoverable = should_retry_header.value_or(false) ||
+            (res == CURLE_OK && should_retry(http_code)) || res == CURLE_SEND_ERROR || res == CURLE_RECV_ERROR ||
             res == CURLE_OPERATION_TIMEDOUT || res == CURLE_COULDNT_CONNECT;
         if (!recoverable)
             return res;
 
-        // If x-should-retry header provided a retry-after hint, respect it.
-        // Otherwise use exponential backoff with jitter.
         double delay = jittered_delay(kBaseDelaySec * (1 << attempt));
         std::this_thread::sleep_for(std::chrono::duration<double>(delay));
     }
@@ -464,12 +465,13 @@ std::expected<void, std::string> llmclient::Client::stream_chat_impl(const nlohm
         if (data_delivered)
             break;
 
-        // Check x-should-retry header — if present and false, don't retry.
+        // Check x-should-retry header — if false, give up; if true, force retry.
         auto should_retry_header = check_x_should_retry(curl);
         if (should_retry_header.has_value() && !*should_retry_header)
             break;
 
-        bool recoverable = (res == CURLE_OK && should_retry(http_code)) || res == CURLE_SEND_ERROR || res == CURLE_RECV_ERROR ||
+        bool recoverable = should_retry_header.value_or(false) ||
+            (res == CURLE_OK && should_retry(http_code)) || res == CURLE_SEND_ERROR || res == CURLE_RECV_ERROR ||
             res == CURLE_OPERATION_TIMEDOUT || res == CURLE_COULDNT_CONNECT;
         if (!recoverable)
             break;
