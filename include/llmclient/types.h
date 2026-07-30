@@ -83,6 +83,7 @@ struct ChatResponse {
     std::string finish_reason; // "stop", "tool_calls", "length", etc.
     std::string id;
     std::string model;
+    std::string refusal;       // set when the model refuses to answer (safety filter)
 };
 
 void from_json(const nlohmann::json& j, ChatResponse& r);
@@ -101,12 +102,13 @@ struct ToolCallDelta {
 // ---------------------------------------------------------------------------
 // StreamDelta — consolidated delta for one streaming chunk
 // ---------------------------------------------------------------------------
-// finish_reason is NOT here — delivered via SSEParser::Callbacks::on_finish.
 
 struct StreamDelta {
     std::optional<std::string> content;
     std::optional<std::string> reasoning_content;
     std::optional<std::vector<ToolCallDelta>> tool_calls;
+    std::optional<std::string> finish_reason; // "stop", "tool_calls", "length", etc.
+    std::optional<std::string> refusal;       // model refusal (safety filter)
 };
 
 // ---------------------------------------------------------------------------
@@ -140,6 +142,7 @@ class SSEParser {
         std::function<void(const StreamDelta& delta)> on_delta;
 
         /// Streaming finish_reason — fires on the final chunk (before on_done).
+        /// The same value is also available in StreamDelta::finish_reason.
         std::function<void(std::string_view reason)> on_finish;
 
         /// Called once with the final usage object.
@@ -172,25 +175,13 @@ std::string sanitize_utf8(const std::string& input);
 // ---------------------------------------------------------------------------
 
 struct ProtocolMessage {
-    std::string role;                             // system, user, assistant, tool
+    std::string role;                             // system, user, assistant, tool, developer
     std::optional<std::string> content;           // nullopt for tool_call messages
     std::vector<ContentPart> parts;               // multipart content (user images)
     std::vector<ToolCall> tool_calls;             // for assistant tool_call msgs
     std::string tool_call_id;                     // for tool result messages
     std::string reasoning_content;                // model-specific, may be empty
 };
-
-/// Build the OpenAI-compatible messages array from a vector of ProtocolMessages.
-nlohmann::json build_openai_payload(const std::vector<ProtocolMessage>& messages,
-                                    const std::string& system_prompt);
-
-/// Build a function tool definition JSON object.
-/// Deprecated: prefer constructing a ToolDef and calling to_json(td) instead.
-/// Kept for backward compatibility; will be moved to json_helpers.h in a future
-/// cleanup pass.
-nlohmann::json make_function_tool(const std::string& name,
-                                  const std::string& description,
-                                  const nlohmann::json& parameters);
 
 // ---------------------------------------------------------------------------
 // ParamDef — typed parameter definition for simple tools
@@ -239,6 +230,26 @@ struct ToolDef {
 void to_json(nlohmann::json& j, const ToolDef& td);
 
 // ---------------------------------------------------------------------------
+// ToolChoice — controls whether and how the model uses tools
+// ---------------------------------------------------------------------------
+
+struct ToolChoice {
+    enum Type { Auto, Required, None, Named };
+    Type type = Auto;
+    std::string name;  // for Named mode — tool name to force
+};
+
+// ---------------------------------------------------------------------------
+// ResponseFormat — controls the output format of the model response
+// ---------------------------------------------------------------------------
+
+struct ResponseFormat {
+    enum Type { Text, JsonObject, JsonSchema };
+    Type type = Text;
+    std::string json_schema;  // JSON Schema string for JsonSchema mode
+};
+
+// ---------------------------------------------------------------------------
 // ChatRequest — typed request payload for chat completions
 // ---------------------------------------------------------------------------
 
@@ -250,8 +261,9 @@ struct ChatRequest {
 
     // ── Token limits ──
     // Max tokens hint. The library decides which wire field to write:
-    //   max_completion_tokens (when thinking_enabled=true) or
-    //   max_tokens (thinking_enabled=false).
+    //   max_completion_tokens (for o-series models) or
+    //   max_tokens (all other models).
+    // When thinking is also enabled, max_completion_tokens is always used.
     // If 0, falls back to context_limit/4 (capped at 32768).
     int max_tokens = 0;
 
@@ -273,6 +285,23 @@ struct ChatRequest {
 
     // ── Streaming options ──
     bool include_usage = true;        // maps to stream_options.include_usage
+
+    // ── Tool call behaviour ──
+    // Controls whether and how the model uses tools.
+    // nullopt → field omitted (default model behaviour).
+    std::optional<ToolChoice> tool_choice;
+
+    // Whether to allow parallel tool calls. Only meaningful when tools are provided.
+    // Defaults to true per OpenAI API.
+    bool parallel_tool_calls = true;
+
+    // ── Stop sequences ──
+    // Up to 4 custom stop sequences. Empty vector → omitted.
+    std::vector<std::string> stop;
+
+    // ── Response format ──
+    // Controls structured output mode. Text → omitted (no response_format key).
+    ResponseFormat response_format;
 };
 
 /// Serialize a ChatRequest to an OpenAI-compatible JSON payload.

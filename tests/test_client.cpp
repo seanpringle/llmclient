@@ -716,13 +716,199 @@ TEST_CASE("to_json(ToolDef) raw_schema path", "[client]") {
     CHECK(from_td["function"]["parameters"]["required"][0] == "x");
 }
 
-TEST_CASE("Client build_chat_request delegates to to_json", "[client]") {
-    Client client("http://example.com/v1");
-    auto req = simple_req("test-model", "hi", true);
 
-    json from_client = client.build_chat_request(req);
-    json from_free = to_json(req);
-    CHECK(from_client == from_free);
+// ===================================================================
+// tool_choice serialization tests
+// ===================================================================
+
+TEST_CASE("to_json(ChatRequest) tool_choice nullopt omits field", "[client]") {
+    auto req = simple_req("test", "hi", false);
+    json payload = to_json(req);
+    CHECK_FALSE(payload.contains("tool_choice"));
+}
+
+TEST_CASE("to_json(ChatRequest) tool_choice auto", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.messages.push_back({.role = "user", .content = "hi"});
+    req.tool_choice = ToolChoice{ToolChoice::Auto};
+    json payload = to_json(req);
+    REQUIRE(payload.contains("tool_choice"));
+    CHECK(payload["tool_choice"] == "auto");
+}
+
+TEST_CASE("to_json(ChatRequest) tool_choice required", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.messages.push_back({.role = "user", .content = "hi"});
+    req.tool_choice = ToolChoice{ToolChoice::Required};
+    json payload = to_json(req);
+    CHECK(payload["tool_choice"] == "required");
+}
+
+TEST_CASE("to_json(ChatRequest) tool_choice none", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.messages.push_back({.role = "user", .content = "hi"});
+    req.tool_choice = ToolChoice{ToolChoice::None};
+    json payload = to_json(req);
+    CHECK(payload["tool_choice"] == "none");
+}
+
+TEST_CASE("to_json(ChatRequest) tool_choice named forces specific tool", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.messages.push_back({.role = "user", .content = "hi"});
+    req.tool_choice = ToolChoice{ToolChoice::Named, "get_weather"};
+    json payload = to_json(req);
+    REQUIRE(payload.contains("tool_choice"));
+    REQUIRE(payload["tool_choice"].is_object());
+    CHECK(payload["tool_choice"]["type"] == "function");
+    CHECK(payload["tool_choice"]["function"]["name"] == "get_weather");
+}
+
+// ===================================================================
+// stop sequences serialization tests
+// ===================================================================
+
+TEST_CASE("to_json(ChatRequest) stop empty omits field", "[client]") {
+    auto req = simple_req("test", "hi", false);
+    json payload = to_json(req);
+    CHECK_FALSE(payload.contains("stop"));
+}
+
+TEST_CASE("to_json(ChatRequest) stop with values", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.messages.push_back({.role = "user", .content = "hi"});
+    req.stop = {"\n", "STOP"};
+    json payload = to_json(req);
+    REQUIRE(payload.contains("stop"));
+    REQUIRE(payload["stop"].is_array());
+    CHECK(payload["stop"].size() == 2);
+    CHECK(payload["stop"][0] == "\n");
+    CHECK(payload["stop"][1] == "STOP");
+}
+
+// ===================================================================
+// response_format serialization tests
+// ===================================================================
+
+TEST_CASE("to_json(ChatRequest) response_format text omits field", "[client]") {
+    auto req = simple_req("test", "hi", false);
+    json payload = to_json(req);
+    CHECK_FALSE(payload.contains("response_format"));
+}
+
+TEST_CASE("to_json(ChatRequest) response_format json_object", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.messages.push_back({.role = "user", .content = "hi"});
+    req.response_format.type = ResponseFormat::JsonObject;
+    json payload = to_json(req);
+    REQUIRE(payload.contains("response_format"));
+    CHECK(payload["response_format"]["type"] == "json_object");
+}
+
+TEST_CASE("to_json(ChatRequest) response_format json_schema", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.messages.push_back({.role = "user", .content = "hi"});
+    req.response_format.type = ResponseFormat::JsonSchema;
+    req.response_format.json_schema = R"({"type":"object","properties":{"name":{"type":"string"}}})";
+    json payload = to_json(req);
+    REQUIRE(payload.contains("response_format"));
+    CHECK(payload["response_format"]["type"] == "json_schema");
+    CHECK(payload["response_format"]["json_schema"]["name"] == "structured_output");
+    CHECK(payload["response_format"]["json_schema"]["strict"] == true);
+    CHECK(payload["response_format"]["json_schema"]["schema"]["type"] == "object");
+}
+
+// ===================================================================
+// parallel_tool_calls serialization tests
+// ===================================================================
+
+TEST_CASE("to_json(ChatRequest) parallel_tool_calls default omits field", "[client]") {
+    auto req = simple_req("test", "hi", false);
+    // Default is true; without tools the field should be omitted
+    json payload = to_json(req);
+    CHECK_FALSE(payload.contains("parallel_tool_calls"));
+}
+
+TEST_CASE("to_json(ChatRequest) parallel_tool_calls false with tools", "[client]") {
+    ChatRequest req;
+    req.model = "test";
+    req.messages.push_back({.role = "user", .content = "hi"});
+    ToolDef td;
+    td.name = "test";
+    req.tools.push_back(td);
+    req.parallel_tool_calls = false;
+    json payload = to_json(req);
+    REQUIRE(payload.contains("parallel_tool_calls"));
+    CHECK(payload["parallel_tool_calls"] == false);
+}
+
+// ===================================================================
+// max_completion_tokens logic tests
+// ===================================================================
+
+TEST_CASE("to_json(ChatRequest) non-o-series uses max_tokens", "[client]") {
+    ChatRequest req;
+    req.model = "gpt-4o";
+    req.messages.push_back({.role = "user", .content = "hi"});
+    req.max_tokens = 1000;
+    json payload = to_json(req);
+    CHECK(payload.contains("max_tokens"));
+    CHECK(payload["max_tokens"] == 1000);
+    CHECK_FALSE(payload.contains("max_completion_tokens"));
+}
+
+TEST_CASE("to_json(ChatRequest) o-series uses max_completion_tokens even without thinking", "[client]") {
+    ChatRequest req;
+    req.model = "o3-mini";
+    req.messages.push_back({.role = "user", .content = "hi"});
+    req.max_tokens = 2000;
+    json payload = to_json(req);
+    CHECK(payload.contains("max_completion_tokens"));
+    CHECK(payload["max_completion_tokens"] == 2000);
+    CHECK_FALSE(payload.contains("max_tokens"));
+}
+
+TEST_CASE("to_json(ChatRequest) o-series with thinking uses max_completion_tokens", "[client]") {
+    ChatRequest req;
+    req.model = "o3-mini";
+    req.messages.push_back({.role = "user", .content = "think"});
+    req.thinking_enabled = true;
+    req.max_tokens = 4096;
+    json payload = to_json(req);
+    CHECK(payload["max_completion_tokens"] == 4096);
+}
+
+TEST_CASE("to_json(ChatRequest) non-o-series with thinking uses max_completion_tokens", "[client]") {
+    ChatRequest req;
+    req.model = "deepseek-v4";
+    req.messages.push_back({.role = "user", .content = "think"});
+    req.thinking_enabled = true;
+    req.max_tokens = 4096;
+    json payload = to_json(req);
+    CHECK(payload["max_completion_tokens"] == 4096);
+}
+
+// ===================================================================
+// stream_options only included when streaming
+// ===================================================================
+
+TEST_CASE("to_json(ChatRequest) stream_options omitted when not streaming", "[client]") {
+    auto req = simple_req("test", "hi", false);
+    json payload = to_json(req);
+    CHECK_FALSE(payload.contains("stream_options"));
+}
+
+TEST_CASE("to_json(ChatRequest) stream_options included when streaming", "[client]") {
+    auto req = simple_req("test", "hi", true);
+    json payload = to_json(req);
+    CHECK(payload.contains("stream_options"));
+    CHECK(payload["stream_options"]["include_usage"] == true);
 }
 
 // ===================================================================

@@ -44,12 +44,8 @@ class Client {
     // Query /v1/models and return the list of model IDs (empty on error).
     std::expected<std::vector<std::string>, std::string> fetch_models();
 
-    // ── Payload builders ──
-
-    /// Build a chat completion request payload from a typed ChatRequest.
-    /// Handles model, messages, tools, stream flag, max_tokens/max_completion_tokens,
-    /// stream_options, and thinking/reasoning parameters.
-    nlohmann::json build_chat_request(const ChatRequest& req) const;
+    // Configure retry behaviour
+    void set_max_retries(int n) { max_retries_ = n; }
 
     /// Returns true if the model name matches known reasoning/thinking model patterns.
     static bool model_supports_thinking(const std::string& model);
@@ -64,8 +60,12 @@ class Client {
     std::string models_url() const { return api_base_ + "/models"; }
 
   private:
-    static constexpr int kMaxRetries = 3;
+    static constexpr int kDefaultMaxRetries = 3;
     static constexpr double kBaseDelaySec = 1.0;
+    // Idle timeout for streaming reads: if no data received for this many seconds, abort.
+    static constexpr int kStreamIdleTimeoutSec = 30;
+    // Minimum bytes per second to consider a stream "active" for idle timeout purposes.
+    static constexpr long kStreamMinRateBytesPerSec = 1;
 
     struct curl_slist* make_headers() const;
     bool should_retry(long http_code) const;
@@ -81,6 +81,7 @@ class Client {
     std::string api_base_;
     std::string api_key_;
     std::string raw_response_;
+    int max_retries_ = kDefaultMaxRetries;
 
     static size_t write_body(char* ptr, size_t size, size_t nmemb, void* userdata);
     static size_t write_stream(char* ptr, size_t size, size_t nmemb, void* userdata);

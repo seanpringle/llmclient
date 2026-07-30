@@ -11,6 +11,21 @@
 namespace llmclient {
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Check if a model name matches o-series patterns that require
+//  max_completion_tokens on the wire.
+static bool is_o_series(const std::string& model) {
+    std::string lower = model;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    return lower.find("o1") != std::string::npos
+        || lower.find("o3") != std::string::npos
+        || lower.find("o4") != std::string::npos
+        || lower.find("gpt-5") != std::string::npos;
+}
+
+// ---------------------------------------------------------------------------
 // Usage JSON deserialization
 // ---------------------------------------------------------------------------
 
@@ -56,18 +71,47 @@ void from_json(const nlohmann::json& j, ChatResponse& r) {
         return;
     }
     const auto& message = *msg_it;
-    // content may be null (for tool_call messages)
+
+    // Parse refusal (safety filter) — mutually exclusive with content
+    r.refusal = message.value("refusal", "");
+
+    // content may be null (for tool_call messages or refusal)
     auto content_it = message.find("content");
     if (content_it != message.end() && !content_it->is_null()) {
-        r.content = content_it->get<std::string>();
+        if (content_it->is_string()) {
+            r.content = content_it->get<std::string>();
+        } else if (content_it->is_array()) {
+            // Some providers return content as an array of content parts.
+            // Concatenate text parts with newlines for backward compatibility.
+            std::string combined;
+            for (const auto& part : *content_it) {
+                if (part.is_object()) {
+                    auto type_it = part.find("type");
+                    if (type_it != part.end() && type_it->is_string() &&
+                        type_it->get<std::string>() == "text") {
+                        auto text_it = part.find("text");
+                        if (text_it != part.end() && text_it->is_string()) {
+                            if (!combined.empty()) combined += '\n';
+                            combined += text_it->get<std::string>();
+                        }
+                    }
+                    // Non-text parts (image_url, etc.) are silently skipped.
+                }
+            }
+            r.content = combined;
+        }
     }
     r.reasoning_content = message.value("reasoning_content", "");
 
     // Parse tool_calls — non-streaming has no "index" field, synthesize from position
+    // Only include items with type == "function" (skip custom, file_search, etc.)
     auto tc_it = message.find("tool_calls");
     if (tc_it != message.end() && tc_it->is_array()) {
         int idx = 0;
         for (const auto& tc_json : *tc_it) {
+            if (tc_json.value("type", "") != "function") {
+                continue; // skip non-function tool calls
+            }
             ToolCall tc;
             tc.index = idx++;
             tc.id = tc_json.value("id", "");
@@ -94,18 +138,21 @@ static const char* content_part_type_str(ContentPartType t) {
 }
 
 static ContentPartType content_part_type_from_str(const std::string& s) {
-    if (s == "image") return ContentPartType::Image;
+    if (s == "image" || s == "image_url") return ContentPartType::Image;
     return ContentPartType::Text;
 }
 
 void to_json(nlohmann::json& j, const ContentPart& cp) {
-    j["type"] = content_part_type_str(cp.type);
     if (cp.type == ContentPartType::Text) {
-        j["text"] = cp.text;
+        j = {{"type", "text"}, {"text", cp.text}};
     } else {
-        j["data"] = cp.data;
-        j["media_type"] = cp.media_type;
-        if (!cp.detail.empty()) j["detail"] = cp.detail;
+        nlohmann::json img;
+        img["type"] = "image_url";
+        std::string data_url = "data:" + cp.media_type + ";base64," + cp.data;
+        img["image_url"]["url"] = data_url;
+        if (!cp.detail.empty())
+            img["image_url"]["detail"] = cp.detail;
+        j = std::move(img);
     }
 }
 
@@ -115,6 +162,30 @@ void from_json(const nlohmann::json& j, ContentPart& cp) {
     cp.data = j.value("data", "");
     cp.media_type = j.value("media_type", "");
     cp.detail = j.value("detail", "");
+    // Also handle detail nested inside image_url (wire format)
+    if (cp.detail.empty()) {
+        auto img_it = j.find("image_url");
+        if (img_it != j.end() && img_it->is_object()) {
+            cp.detail = img_it->value("detail", "");
+            // Extract data from the URL if possible
+            auto url_it = img_it->find("url");
+            if (url_it != img_it->end() && url_it->is_string()) {
+                std::string url = url_it->get<std::string>();
+                // Parse data: URLs of the form data:<mediatype>;base64,<data>
+                auto comma = url.find(',');
+                if (comma != std::string::npos) {
+                    if (cp.data.empty()) cp.data = url.substr(comma + 1);
+                    // Extract media_type from the data URL prefix
+                    if (cp.media_type.empty()) {
+                        auto semi = url.find(';');
+                        if (semi != std::string::npos && semi > 5) {
+                            cp.media_type = url.substr(5, semi - 5); // skip "data:"
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 nlohmann::json build_content_array(const std::vector<ContentPart>& parts) {
@@ -335,15 +406,6 @@ void SSEParser::process_line(std::string line) {
                     const auto& choice = j["choices"][0];
                     const auto& delta = choice["delta"];
 
-                    // Finish reason (sibling of delta, not inside it)
-                    auto fr_it = choice.find("finish_reason");
-                    if (fr_it != choice.end() && !fr_it->is_null()) {
-                        if (cb_.on_finish) {
-                            std::string reason = fr_it->get<std::string>();
-                            cb_.on_finish(reason);
-                        }
-                    }
-
                     // Build StreamDelta
                     if (cb_.on_delta) {
                         StreamDelta sd;
@@ -364,6 +426,19 @@ void SSEParser::process_line(std::string line) {
                             r = extract_str("reasoning");
                         }
                         sd.reasoning_content = std::move(r);
+
+                        // Finish reason (sibling of delta, not inside it)
+                        auto fr_it = choice.find("finish_reason");
+                        if (fr_it != choice.end() && !fr_it->is_null()) {
+                            sd.finish_reason = fr_it->get<std::string>();
+                            // Also fire the legacy on_finish callback
+                            if (cb_.on_finish) {
+                                cb_.on_finish(*sd.finish_reason);
+                            }
+                        }
+
+                        // Refusal (safety filter) — may appear in delta
+                        sd.refusal = extract_str("refusal");
 
                         // Tool calls
                         auto tc_it = delta.find("tool_calls");
@@ -448,99 +523,6 @@ void SSEParser::reset() {
 }
 
 // ---------------------------------------------------------------------------
-// build_openai_payload — build OpenAI-compatible messages array
-// ---------------------------------------------------------------------------
-
-nlohmann::json build_openai_payload(const std::vector<ProtocolMessage>& messages,
-                                    const std::string& system_prompt) {
-    nlohmann::json arr = nlohmann::json::array();
-
-    arr.push_back({{"role", "system"}, {"content", sanitize_utf8(system_prompt)}});
-
-    // Check if any user message uses multipart content — forces all user
-    // messages to use array form.
-    bool force_multipart = false;
-    for (const auto& msg : messages) {
-        if (msg.role == "user" && has_multipart_content(msg.parts)) {
-            force_multipart = true;
-            break;
-        }
-    }
-
-    for (const auto& msg : messages) {
-        if (msg.role == "assistant" && !msg.tool_calls.empty()) {
-            // Assistant with tool calls — expand into assistant + tool messages
-            nlohmann::json j;
-            j["role"] = "assistant";
-            j["content"] = nullptr;
-            if (!msg.reasoning_content.empty()) {
-                j["reasoning_content"] = sanitize_utf8(msg.reasoning_content);
-            }
-
-            nlohmann::json tc_arr = nlohmann::json::array();
-            for (const auto& tc : msg.tool_calls) {
-                nlohmann::json tc_json;
-                tc_json["id"] = tc.id;
-                tc_json["type"] = "function";
-                tc_json["function"] = {{"name", tc.name}, {"arguments", tc.arguments}};
-                tc_arr.push_back(std::move(tc_json));
-            }
-            j["tool_calls"] = std::move(tc_arr);
-            arr.push_back(std::move(j));
-        } else if (msg.role == "tool") {
-            nlohmann::json j;
-            j["role"] = "tool";
-            j["tool_call_id"] = msg.tool_call_id;
-            j["content"] = sanitize_utf8(msg.content.value_or(""));
-            arr.push_back(std::move(j));
-        } else if (msg.role == "user" && (has_multipart_content(msg.parts) || force_multipart)) {
-            nlohmann::json j;
-            j["role"] = "user";
-            if (has_multipart_content(msg.parts)) {
-                j["content"] = build_content_array(msg.parts);
-            } else {
-                nlohmann::json content_arr = nlohmann::json::array();
-                content_arr.push_back({{"type", "text"}, {"text", sanitize_utf8(msg.content.value_or(""))}});
-                j["content"] = std::move(content_arr);
-            }
-            arr.push_back(std::move(j));
-        } else {
-            nlohmann::json j;
-            j["role"] = msg.role;
-            j["content"] = sanitize_utf8(msg.content.value_or(""));
-
-            if (msg.role == "assistant" && !msg.reasoning_content.empty()) {
-                j["reasoning_content"] = sanitize_utf8(msg.reasoning_content);
-            }
-
-            arr.push_back(std::move(j));
-        }
-    }
-
-    return arr;
-}
-
-// ---------------------------------------------------------------------------
-// make_function_tool — build a function tool definition JSON object
-// ---------------------------------------------------------------------------
-// Deprecated: prefer constructing a ToolDef and calling to_json(td) instead.
-// Kept for backward compatibility with existing tests; will be moved to
-// json_helpers.h in a future cleanup pass.
-
-nlohmann::json make_function_tool(const std::string& name,
-                                  const std::string& description,
-                                  const nlohmann::json& parameters) {
-    return {
-        {"type", "function"},
-        {"function", {
-            {"name", name},
-            {"description", description},
-            {"parameters", parameters}
-        }}
-    };
-}
-
-// ---------------------------------------------------------------------------
 // ToolDef validation
 // ---------------------------------------------------------------------------
 
@@ -556,7 +538,7 @@ std::expected<void, std::string> ToolDef::validate() const {
 
     if (has_params && has_raw) {
         return std::unexpected("ToolDef \"" + name +
-                               "\": params and raw_schema are mutually exclusive");
+                                "\": params and raw_schema are mutually exclusive");
     }
 
     if (has_raw) {
@@ -565,7 +547,7 @@ std::expected<void, std::string> ToolDef::validate() const {
             [[maybe_unused]] auto _ = nlohmann::json::parse(raw_schema);
         } catch (const nlohmann::json::parse_error& e) {
             return std::unexpected("ToolDef \"" + name +
-                                   "\": raw_schema is not valid JSON: " + std::string(e.what()));
+                                    "\": raw_schema is not valid JSON: " + std::string(e.what()));
         }
     }
 
@@ -577,12 +559,12 @@ std::expected<void, std::string> ToolDef::validate() const {
             }
             if (!names.insert(p.name).second) {
                 return std::unexpected("ToolDef \"" + name + "\": duplicate ParamDef name \"" +
-                                       p.name + "\"");
+                                        p.name + "\"");
             }
             if (!kValidParamTypes.count(p.type)) {
                 return std::unexpected("ToolDef \"" + name + "\": ParamDef \"" + p.name +
-                                       "\" has invalid type \"" + p.type +
-                                       "\" (expected: string, integer, boolean, number)");
+                                        "\" has invalid type \"" + p.type +
+                                        "\" (expected: string, integer, boolean, number)");
             }
         }
     }
@@ -625,6 +607,52 @@ void to_json(nlohmann::json& j, const ToolDef& td) {
             {"parameters", std::move(parameters)}
         }}
     };
+}
+
+// ---------------------------------------------------------------------------
+// ToolChoice serialization helper
+// ---------------------------------------------------------------------------
+
+static void to_json(nlohmann::json& j, const ToolChoice& tc) {
+    switch (tc.type) {
+        case ToolChoice::Auto:
+            j = "auto";
+            break;
+        case ToolChoice::Required:
+            j = "required";
+            break;
+        case ToolChoice::None:
+            j = "none";
+            break;
+        case ToolChoice::Named:
+            j = {{"type", "function"}, {"function", {{"name", tc.name}}}};
+            break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ResponseFormat serialization helper
+// ---------------------------------------------------------------------------
+
+static void to_json(nlohmann::json& j, const ResponseFormat& rf) {
+    switch (rf.type) {
+        case ResponseFormat::Text:
+            j = nullptr; // signals "omit"
+            break;
+        case ResponseFormat::JsonObject:
+            j = {{"type", "json_object"}};
+            break;
+        case ResponseFormat::JsonSchema:
+            j = {
+                {"type", "json_schema"},
+                {"json_schema", {
+                    {"name", "structured_output"},
+                    {"schema", nlohmann::json::parse(rf.json_schema)},
+                    {"strict", true}
+                }}
+            };
+            break;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -712,9 +740,13 @@ nlohmann::json to_json(const ChatRequest& req) {
     nlohmann::json payload = {
         {"model", req.model},
         {"messages", std::move(arr)},
-        {"stream", req.stream},
-        {"stream_options", {{"include_usage", req.include_usage}}}
     };
+
+    // Stream flag — only include stream_options when streaming
+    if (req.stream) {
+        payload["stream"] = true;
+        payload["stream_options"] = {{"include_usage", req.include_usage}};
+    }
 
     // Omit tools key entirely when empty
     if (!tools_arr.empty()) {
@@ -727,21 +759,44 @@ nlohmann::json to_json(const ChatRequest& req) {
 
     // Apply thinking/reasoning parameters
     if (req.thinking_enabled) {
-        std::string lower = req.model;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-        bool is_openai = lower.find("o1") != std::string::npos
-                      || lower.find("o3") != std::string::npos
-                      || lower.find("o4") != std::string::npos
-                      || lower.find("gpt-5") != std::string::npos;
-        if (is_openai) {
+        bool openai_o_series = is_o_series(req.model);
+        if (openai_o_series) {
             // Use reasoning_effort from request if set, otherwise default to "high"
             payload["reasoning_effort"] = req.reasoning_effort.value_or("high");
         } else {
             payload["thinking"] = {{"type", "enabled"}};
         }
         payload["max_completion_tokens"] = limit;
+    } else if (is_o_series(req.model)) {
+        // o-series models always use max_completion_tokens even without explicit thinking
+        payload["max_completion_tokens"] = limit;
     } else {
         payload["max_tokens"] = limit;
+    }
+
+    // ── Tool choice ──
+    if (req.tool_choice.has_value()) {
+        nlohmann::json tc_json;
+        to_json(tc_json, *req.tool_choice);
+        payload["tool_choice"] = std::move(tc_json);
+    }
+
+    // ── Parallel tool calls ──
+    if (!req.parallel_tool_calls && !req.tools.empty()) {
+        payload["parallel_tool_calls"] = false;
+    }
+    // When true (default) and tools are present, omit the field (API default is true).
+
+    // ── Stop sequences ──
+    if (!req.stop.empty()) {
+        payload["stop"] = req.stop;
+    }
+
+    // ── Response format ──
+    nlohmann::json rf_json;
+    to_json(rf_json, req.response_format);
+    if (!rf_json.is_null()) {
+        payload["response_format"] = std::move(rf_json);
     }
 
     return payload;

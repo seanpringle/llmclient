@@ -849,138 +849,218 @@ TEST_CASE("ProtocolMessage with tool_calls has null content", "[types][protocol]
 }
 
 // ========================================================================
-// make_function_tool tests
+// ChatResponse refusal parsing tests
 // ========================================================================
 
-TEST_CASE("make_function_tool produces correct JSON shape", "[types][tool]") {
-    json params = {{"type", "object"}, {"properties", {{"path", {{"type", "string"}}}}}};
-    json tool = make_function_tool("read_file", "Read a file", params);
-
-    CHECK(tool["type"] == "function");
-    CHECK(tool["function"]["name"] == "read_file");
-    CHECK(tool["function"]["description"] == "Read a file");
-    CHECK(tool["function"]["parameters"]["type"] == "object");
-    CHECK(tool["function"]["parameters"]["properties"]["path"]["type"] == "string");
+TEST_CASE("ChatResponse from_json parses refusal", "[types][chatresponse]") {
+    json j = json::parse(R"({
+        "id": "chatcmpl-ref",
+        "model": "gpt-4",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "refusal": "I cannot answer that question."
+            }
+        }]
+    })");
+    ChatResponse r = j.get<ChatResponse>();
+    CHECK(r.content.empty());
+    CHECK(r.refusal == "I cannot answer that question.");
 }
 
-TEST_CASE("make_function_tool with empty description", "[types][tool]") {
-    json tool = make_function_tool("noop", "", json::object());
-    CHECK(tool["type"] == "function");
-    CHECK(tool["function"]["name"] == "noop");
-    CHECK(tool["function"]["description"] == "");
+TEST_CASE("ChatResponse from_json refusal empty when absent", "[types][chatresponse]") {
+    json j = json::parse(R"({
+        "id": "chatcmpl-123",
+        "model": "gpt-4",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "Hello"
+            }
+        }]
+    })");
+    ChatResponse r = j.get<ChatResponse>();
+    CHECK(r.content == "Hello");
+    CHECK(r.refusal.empty());
 }
 
 // ========================================================================
-// build_openai_payload tests
+// ChatResponse tool_call type filter tests
 // ========================================================================
 
-TEST_CASE("build_openai_payload full conversation with tool calls", "[types][payload]") {
-    // Build a full conversation: user(text)+user(image)+assistant(tc)+tool result
-    ProtocolMessage user_text;
-    user_text.role = "user";
-    user_text.content = "Look at this";
-
-    ProtocolMessage user_img;
-    user_img.role = "user";
-    ContentPart img;
-    img.type = ContentPartType::Image;
-    img.data = "dGVzdA==";
-    img.media_type = "image/png";
-    user_img.parts.push_back(img);
-
-    ToolCall tc;
-    tc.id = "call_1";
-    tc.name = "describe";
-    tc.arguments = R"({"param":"val"})";
-
-    ProtocolMessage asst;
-    asst.role = "assistant";
-    asst.content = std::nullopt;
-    asst.reasoning_content = "I need to describe this image.";
-    asst.tool_calls.push_back(tc);
-
-    ProtocolMessage tool_result;
-    tool_result.role = "tool";
-    tool_result.tool_call_id = "call_1";
-    tool_result.content = "A beautiful landscape";
-
-    std::vector<ProtocolMessage> msgs = {user_text, user_img, asst, tool_result};
-
-    json payload = build_openai_payload(msgs, "You are helpful.");
-    // system + user(text) + user(img) + assistant + tool = 5
-    REQUIRE(payload.is_array());
-    REQUIRE(payload.size() == 5);
-
-    // Check system prompt
-    CHECK(payload[0]["role"] == "system");
-    CHECK(payload[0]["content"] == "You are helpful.");
-
-    // Text-only user message (should be array form due to force_multipart from the image)
-    CHECK(payload[1]["role"] == "user");
-    CHECK(payload[1]["content"].is_array());
-    CHECK(payload[1]["content"][0]["type"] == "text");
-    CHECK(payload[1]["content"][0]["text"] == "Look at this");
-
-    // Image user message
-    CHECK(payload[2]["role"] == "user");
-    CHECK(payload[2]["content"].is_array());
-    CHECK(payload[2]["content"][0]["type"] == "image_url");
-    CHECK(payload[2]["content"][0]["image_url"]["url"] == "data:image/png;base64,dGVzdA==");
-
-    // Assistant with tool_calls
-    CHECK(payload[3]["role"] == "assistant");
-    CHECK(payload[3]["content"] == nullptr);
-    CHECK(payload[3]["reasoning_content"] == "I need to describe this image.");
-    REQUIRE(payload[3]["tool_calls"].is_array());
-    CHECK(payload[3]["tool_calls"][0]["id"] == "call_1");
-    CHECK(payload[3]["tool_calls"][0]["type"] == "function");
-    CHECK(payload[3]["tool_calls"][0]["function"]["name"] == "describe");
-    CHECK(payload[3]["tool_calls"][0]["function"]["arguments"] == R"({"param":"val"})");
-
-    // Tool result
-    CHECK(payload[4]["role"] == "tool");
-    CHECK(payload[4]["tool_call_id"] == "call_1");
-    CHECK(payload[4]["content"] == "A beautiful landscape");
+TEST_CASE("ChatResponse from_json skips non-function tool_calls", "[types][chatresponse]") {
+    json j = json::parse(R"({
+        "id": "chatcmpl-tc",
+        "model": "gpt-4",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {
+                        "id": "call_func",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"}
+                    },
+                    {
+                        "id": "call_custom",
+                        "type": "custom",
+                        "function": {"name": "custom_op", "arguments": "{}"}
+                    }
+                ]
+            }
+        }]
+    })");
+    ChatResponse r = j.get<ChatResponse>();
+    REQUIRE(r.tool_calls.size() == 1);
+    CHECK(r.tool_calls[0].id == "call_func");
 }
 
-TEST_CASE("build_openai_payload forces array-form on user messages when any multipart", "[types][payload]") {
-    ProtocolMessage text_only_first;
-    text_only_first.role = "user";
-    text_only_first.content = "Just text";
+// ========================================================================
+// ChatResponse content array parsing
+// ========================================================================
 
-    ProtocolMessage text_only_second;
-    text_only_second.role = "user";
-    text_only_second.content = "More text";
+TEST_CASE("ChatResponse from_json content as array concatenates text", "[types][chatresponse]") {
+    json j = json::parse(R"({
+        "id": "chatcmpl-arr",
+        "model": "gpt-4",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Hello"},
+                    {"type": "text", "text": "World"}
+                ]
+            }
+        }]
+    })");
+    ChatResponse r = j.get<ChatResponse>();
+    CHECK(r.content == "Hello\nWorld");
+}
 
-    // No multipart — should get flat content
-    json payload = build_openai_payload({text_only_first, text_only_second}, "test");
-    CHECK(payload[1]["content"].is_string());
-    CHECK(payload[2]["content"].is_string());
+TEST_CASE("ChatResponse from_json content array skips non-text parts", "[types][chatresponse]") {
+    json j = json::parse(R"({
+        "id": "chatcmpl-arr2",
+        "model": "gpt-4",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Caption:"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}
+                ]
+            }
+        }]
+    })");
+    ChatResponse r = j.get<ChatResponse>();
+    CHECK(r.content == "Caption:");
+}
 
-    // Add a third user message with an image
-    ProtocolMessage img_user;
-    img_user.role = "user";
-    ContentPart img;
-    img.type = ContentPartType::Image;
-    img.data = "x";
-    img.media_type = "image/gif";
-    img_user.parts.push_back(img);
+// ========================================================================
+// ContentPart wire format tests (B1 fix)
+// ========================================================================
 
-    payload = build_openai_payload({text_only_first, img_user, text_only_second}, "test");
-    // First text msg now forced to array
-    CHECK(payload[1]["role"] == "user");
-    CHECK(payload[1]["content"].is_array());
-    CHECK(payload[1]["content"][0]["type"] == "text");
-    CHECK(payload[1]["content"][0]["text"] == "Just text");
+TEST_CASE("ContentPart to_json image writes detail inside image_url", "[types][contentpart]") {
+    ContentPart cp;
+    cp.type = ContentPartType::Image;
+    cp.data = "base64data";
+    cp.media_type = "image/png";
+    cp.detail = "high";
 
-    // Image user
-    CHECK(payload[2]["role"] == "user");
-    CHECK(payload[2]["content"].is_array());
-    CHECK(payload[2]["content"][0]["type"] == "image_url");
+    json j = cp;
+    // Should produce wire-format: {"type":"image_url","image_url":{"url":"...","detail":"high"}}
+    CHECK(j["type"] == "image_url");
+    CHECK(j["image_url"]["url"] == "data:image/png;base64,base64data");
+    CHECK(j["image_url"]["detail"] == "high");
+    // detail should NOT be at top level
+    CHECK_FALSE(j.contains("data"));
+    CHECK_FALSE(j.contains("media_type"));
+}
 
-    // Second text msg also forced to array
-    CHECK(payload[3]["role"] == "user");
-    CHECK(payload[3]["content"].is_array());
-    CHECK(payload[3]["content"][0]["type"] == "text");
-    CHECK(payload[3]["content"][0]["text"] == "More text");
+TEST_CASE("ContentPart from_json reads detail from image_url", "[types][contentpart]") {
+    json j = json::parse(R"({
+        "type": "image_url",
+        "image_url": {
+            "url": "data:image/jpeg;base64,test123",
+            "detail": "low"
+        }
+    })");
+    ContentPart cp = j.get<ContentPart>();
+    CHECK(cp.type == ContentPartType::Image);
+    CHECK(cp.data == "test123");
+    CHECK(cp.media_type == "image/jpeg");
+    CHECK(cp.detail == "low");
+}
+
+// ========================================================================
+// StreamDelta finish_reason tests (G7)
+// ========================================================================
+
+TEST_CASE("SSEParser on_delta includes finish_reason", "[types][sse]") {
+    std::optional<std::string> finish_reason;
+    bool delta_fired = false;
+
+    SSEParser parser(SSEParser::Callbacks{
+        .on_done = []() {},
+        .on_error = [](const std::string&) {},
+        .on_delta = [&](const StreamDelta& d) {
+            delta_fired = true;
+            if (d.finish_reason) finish_reason = *d.finish_reason;
+        },
+    });
+
+    parser.feed("data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n\ndata: [DONE]\n\n", 71);
+    CHECK(delta_fired);
+    CHECK(finish_reason.has_value());
+    CHECK(*finish_reason == "stop");
+}
+
+// ========================================================================
+// StreamDelta refusal in streaming (decision #6)
+// ========================================================================
+
+TEST_CASE("SSEParser on_delta includes refusal", "[types][sse]") {
+    std::optional<std::string> refusal;
+
+    SSEParser parser(SSEParser::Callbacks{
+        .on_done = []() {},
+        .on_error = [](const std::string&) {},
+        .on_delta = [&](const StreamDelta& d) {
+            if (d.refusal) refusal = *d.refusal;
+        },
+    });
+
+    parser.feed("data: {\"choices\":[{\"delta\":{\"refusal\":\"Cannot answer\"}}]}\n\n", 64);
+    CHECK(refusal.has_value());
+    CHECK(*refusal == "Cannot answer");
+}
+
+// ========================================================================
+// ProtocolMessage developer role (G8)
+// ========================================================================
+
+TEST_CASE("ProtocolMessage developer role serialized as-is", "[types][protocol]") {
+    ProtocolMessage dev;
+    dev.role = "developer";
+    dev.content = "Think step by step.";
+
+    ChatRequest req;
+    req.model = "test";
+    req.messages.push_back(std::move(dev));
+
+    json payload = to_json(req);
+    REQUIRE(payload["messages"].size() == 1);
+    CHECK(payload["messages"][0]["role"] == "developer");
+    CHECK(payload["messages"][0]["content"] == "Think step by step.");
 }

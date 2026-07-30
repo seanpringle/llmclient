@@ -85,10 +85,26 @@ static CURL* setup_curl(const std::string& url, struct curl_slist* headers, cons
     return curl;
 }
 
-// Retry on rate-limit (429) or server errors (5xx) — but not 4xx client errors
-// which indicate a malformed request that will keep failing.
+// Retry on rate-limit (429), request timeout (408), conflict (409), or server errors (5xx).
+// Does NOT retry on other 4xx client errors which indicate a malformed request.
 bool llmclient::Client::should_retry(long http_code) const {
-    return http_code == 429 || (http_code >= 500 && http_code < 600);
+    return http_code == 408 || http_code == 409 || http_code == 429 || (http_code >= 500 && http_code < 600);
+}
+
+// Check the x-should-retry response header used by some proxy/gateway backends.
+// Returns true if the header explicitly says "true", false if "false", nullopt if absent.
+static std::optional<bool> check_x_should_retry(CURL* curl) {
+    struct curl_header* header = nullptr;
+    CURLHcode hres = curl_easy_header(curl, "x-should-retry", 0, CURLH_HEADER, -1, &header);
+    if (hres == CURLHE_OK && header && header->value) {
+        std::string value = header->value;
+        // Strip whitespace
+        value.erase(0, value.find_first_not_of(" \t\r\n"));
+        value.erase(value.find_last_not_of(" \t\r\n") + 1);
+        if (value == "true") return true;
+        if (value == "false") return false;
+    }
+    return std::nullopt;
 }
 
 /// Returns a random delay in [0.5*base, 1.5*base] to add jitter to retries.
@@ -100,7 +116,7 @@ static double jittered_delay(double base_sec) {
 }
 
 CURLcode llmclient::Client::perform_with_retry(CURL* curl, long& http_code, std::string& body) {
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+    for (int attempt = 0; attempt < max_retries_; ++attempt) {
         body.clear();
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
@@ -111,17 +127,25 @@ CURLcode llmclient::Client::perform_with_retry(CURL* curl, long& http_code, std:
         if (res == CURLE_OK && !should_retry(http_code))
             return CURLE_OK;
 
-        if (attempt == kMaxRetries - 1)
+        if (attempt == max_retries_ - 1)
             return res;
 
-        // Recoverable: HTTP-level errors on successful connections (e.g. 5xx, 429)
+        // Check x-should-retry header — if present and false, don't retry.
+        auto should_retry_header = check_x_should_retry(curl);
+        if (should_retry_header.has_value() && !*should_retry_header)
+            return res;
+
+        // Recoverable: HTTP-level errors on successful connections (e.g. 5xx, 429, 408, 409)
         // plus transient transport failures that may succeed on retry.
         bool recoverable = (res == CURLE_OK && should_retry(http_code)) || res == CURLE_SEND_ERROR || res == CURLE_RECV_ERROR ||
             res == CURLE_OPERATION_TIMEDOUT || res == CURLE_COULDNT_CONNECT;
         if (!recoverable)
             return res;
 
-        std::this_thread::sleep_for(std::chrono::duration<double>(jittered_delay(kBaseDelaySec * (1 << attempt))));
+        // If x-should-retry header provided a retry-after hint, respect it.
+        // Otherwise use exponential backoff with jitter.
+        double delay = jittered_delay(kBaseDelaySec * (1 << attempt));
+        std::this_thread::sleep_for(std::chrono::duration<double>(delay));
     }
     return CURLE_OK;
 }
@@ -351,6 +375,11 @@ std::expected<llmclient::ChatResponse, std::string> llmclient::Client::chat(cons
 }
 
 std::expected<void, std::string> llmclient::Client::stream_chat(const ChatRequest& req, SSEParser::Callbacks callbacks) {
+    // Validate that at least on_delta is provided — fail-fast rather than silently losing data.
+    if (!callbacks.on_delta) {
+        return std::unexpected("stream_chat: on_delta callback is required");
+    }
+
     nlohmann::json payload = to_json(req);
     return stream_chat_impl(payload, std::move(callbacks));
 }
@@ -404,11 +433,18 @@ std::expected<void, std::string> llmclient::Client::stream_chat_impl(const nlohm
         return std::unexpected(std::string("curl_easy_init failed"));
     }
 
+    // Apply streaming-specific timeouts:
+    // - Per-chunk idle timeout: if no data arrives for kStreamIdleTimeoutSec, abort.
+    // - Total timeout: 10 minutes for the entire streaming session (typically generous).
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, kStreamIdleTimeoutSec);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, kStreamMinRateBytesPerSec);
+
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_stream);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &parser);
 
     CURLcode res = CURLE_OK;
-    for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+    for (int attempt = 0; attempt < max_retries_; ++attempt) {
         data_delivered = false;
         parser.reset();
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_stream);
@@ -420,12 +456,17 @@ std::expected<void, std::string> llmclient::Client::stream_chat_impl(const nlohm
         if (res == CURLE_OK && !should_retry(http_code))
             break;
 
-        if (attempt == kMaxRetries - 1)
+        if (attempt == max_retries_ - 1)
             break;
 
         // If any callback was already invoked, data was consumed by the user.
         // Retrying would produce duplicate content — bail out instead.
         if (data_delivered)
+            break;
+
+        // Check x-should-retry header — if present and false, don't retry.
+        auto should_retry_header = check_x_should_retry(curl);
+        if (should_retry_header.has_value() && !*should_retry_header)
             break;
 
         bool recoverable = (res == CURLE_OK && should_retry(http_code)) || res == CURLE_SEND_ERROR || res == CURLE_RECV_ERROR ||
@@ -478,11 +519,7 @@ std::expected<void, std::string> llmclient::Client::stream_chat_impl(const nlohm
     return {};
 }
 
-// ── Payload building ──
-
-nlohmann::json llmclient::Client::build_chat_request(const ChatRequest& req) const {
-    return to_json(req);
-}
+// ── Model detection helpers ──
 
 bool llmclient::Client::model_supports_thinking(const std::string& model) {
     static const char* keywords[] = {
