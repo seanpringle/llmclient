@@ -766,18 +766,16 @@ nlohmann::json to_json(const ChatRequest& req) {
     int limit = req.max_tokens > 0 ? req.max_tokens
         : (req.context_limit > 0 ? std::min(req.context_limit / 4, 32768) : 32768);
 
-    // Apply thinking/reasoning parameters
+    // ── Thinking / reasoning parameters ──
+    // When thinking is enabled, always send BOTH thinking and reasoning_effort.
+    // This is correct for all model families: o-series (OpenAI ignores unknown
+    // params), DeepSeek (docs require both), Qwen3, GLM, MiMo.
     if (req.thinking_enabled) {
-        bool openai_o_series = is_o_series(req.model);
-        if (openai_o_series) {
-            // Use reasoning_effort from request if set, otherwise default to "high"
-            payload["reasoning_effort"] = req.reasoning_effort.value_or("high");
-        } else {
-            payload["thinking"] = {{"type", "enabled"}};
-        }
+        payload["thinking"] = {{"type", "enabled"}};
+        payload["reasoning_effort"] = req.reasoning_effort.value_or("high");
         payload["max_completion_tokens"] = limit;
     } else if (is_o_series(req.model)) {
-        // o-series models always use max_completion_tokens even without explicit thinking
+        // o-series always use max_completion_tokens even without thinking
         payload["max_completion_tokens"] = limit;
     } else {
         payload["max_tokens"] = limit;
