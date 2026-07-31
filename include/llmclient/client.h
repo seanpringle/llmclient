@@ -63,7 +63,7 @@ class Client {
     static constexpr int kDefaultMaxRetries = 3;
     static constexpr double kBaseDelaySec = 1.0;
     // Idle timeout for streaming reads: if no data received for this many seconds, abort.
-    static constexpr int kStreamIdleTimeoutSec = 30;
+    static constexpr int kStreamIdleTimeoutSec = 600;
     // Minimum bytes per second to consider a stream "active" for idle timeout purposes.
     static constexpr long kStreamMinRateBytesPerSec = 1;
 
